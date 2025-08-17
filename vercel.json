@@ -1,6 +1,6 @@
 ﻿{
   "version": 2,
-  "name": "course_backend",
+  "name": "course_video_backend",
   "builds": [
     {
       "src": "server.js",
