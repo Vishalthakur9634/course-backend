@@ -1,9 +1,13 @@
 ﻿{
   "version": 2,
+  "name": "course_backend",
   "builds": [
     {
       "src": "server.js",
-      "use": "@vercel/node"
+      "use": "@vercel/node",
+      "config": { 
+        "includeFiles": ["uploads/**"] 
+      }
     }
   ],
   "routes": [
