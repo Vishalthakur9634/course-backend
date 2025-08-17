@@ -35,7 +35,9 @@ const generalCorsOptions = {
     'http://localhost:5173', 
     'http://localhost:3000', 
     'http://127.0.0.1:5173',
-    'http://127.0.0.1:3000'
+    'http://127.0.0.1:3000',
+    'https://course-fronte.netlify.app', // Added Netlify frontend URL
+    process.env.FRONTEND_URL // Using environment variable
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
@@ -351,3 +353,6 @@ process.on('SIGINT', () => {
     });
   });
 });
+
+// Export the Express app for Vercel
+module.exports = app;
