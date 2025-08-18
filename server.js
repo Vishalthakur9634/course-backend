@@ -76,7 +76,9 @@ const videoCorsOptions = {
     'http://localhost:5173', 
     'http://localhost:3000', 
     'http://127.0.0.1:5173',
-    'http://127.0.0.1:3000'
+    'http://127.0.0.1:3000',
+    'https://course-fronte.netlify.app', // Added Netlify frontend URL
+    process.env.FRONTEND_URL
   ],
   credentials: true,
   methods: ['GET', 'HEAD', 'OPTIONS'],
