@@ -32,10 +32,7 @@ connectDB();
 // Enhanced CORS configuration for different endpoints
 const generalCorsOptions = {
   origin: [
-    'http://localhost:5173', 
-    'http://localhost:3000', 
-    'http://127.0.0.1:5173',
-    'http://127.0.0.1:3000',
+
     'https://course-fronte.netlify.app', // Added Netlify frontend URL
     process.env.FRONTEND_URL // Using environment variable
   ],
@@ -73,10 +70,7 @@ const generalCorsOptions = {
 // Special CORS configuration for video streaming endpoints
 const videoCorsOptions = {
   origin: [
-    'http://localhost:5173', 
-    'http://localhost:3000', 
-    'http://127.0.0.1:5173',
-    'http://127.0.0.1:3000',
+
     'https://course-fronte.netlify.app', // Added Netlify frontend URL
     process.env.FRONTEND_URL
   ],
@@ -125,10 +119,9 @@ app.use('/api/videos/stream', (req, res, next) => {
   // Set CORS headers explicitly for video streaming
   const origin = req.headers.origin;
   const allowedOrigins = [
-    'http://localhost:5173', 
-    'http://localhost:3000', 
-    'http://127.0.0.1:5173',
-    'http://127.0.0.1:3000'
+
+      'https://course-fronte.netlify.app', // Added Netlify frontend URL
+    process.env.FRONTEND_URL
   ];
   
   if (allowedOrigins.includes(origin)) {
