@@ -1,139 +1,89 @@
 const express = require('express');
-const router = express.Router();
+const multer = require('multer');
+const ffmpeg = require('fluent-ffmpeg');
+const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs').promises;
-const ffmpeg = require('fluent-ffmpeg');
-const multer = require('multer');
-const mongoose = require('mongoose');
 
-// ========== CRITICAL FFMPEG CONFIGURATION ==========
-// Method 1: Use ffmpeg-static package (preferred)
-try {
-  const ffmpegPath = require('ffmpeg-static');
-  const ffprobePath = require('@ffprobe-installer/ffprobe').path;
-  
-  ffmpeg.setFfmpegPath(ffmpegPath);
-  ffmpeg.setFfprobePath(ffprobePath);
-  
-  console.log('FFmpeg path set to:', ffmpegPath);
-  console.log('FFprobe path set to:', ffprobePath);
-} catch (err) {
-  console.error('Error setting FFmpeg paths from packages:', err);
-  
-  // Method 2: Fallback to system PATH
-  console.log('Falling back to system PATH for FFmpeg');
-  
-  // Verify FFmpeg is in system PATH
-  const isWin = process.platform === 'win32';
-  const ffmpegCommand = isWin ? 'where ffmpeg' : 'which ffmpeg';
-  
-  require('child_process').exec(ffmpegCommand, (error, stdout) => {
-    if (error) {
-      console.error('FFmpeg not found in system PATH!');
-      throw new Error('FFmpeg not found. Please install FFmpeg and add it to your PATH');
-    }
-    console.log('Found FFmpeg at:', stdout.trim());
-  });
-}
+const router = express.Router();
 
-// Video Model Schema
-const videoSchema = new mongoose.Schema({
-  title: String,
-  description: String,
-  originalFileName: String,
-  filePath: String,
-  fileSize: Number,
-  mimeType: String,
-  duration: Number,
-  renditions: [{
-    resolution: String,
-    bandwidth: Number,
-    playlistPath: String
-  }],
-  createdAt: { type: Date, default: Date.now }
-});
-const Video = mongoose.model('Video', videoSchema);
-
-// Configure upload directory
+// Ensure uploads directory exists
 const uploadDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Improved Multer configuration
+// Multer configuration for file uploads
 const storage = multer.diskStorage({
-  destination: uploadDir,
-  filename: (req, file, cb) => {
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, `${uniqueSuffix}${path.extname(file.originalname)}`);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
   }
 });
 
-const fileFilter = (req, file, cb) => {
-  const validMimes = [
-    'video/mp4',
-    'video/quicktime',
-    'video/x-msvideo',
-    'video/x-matroska',
-    'video/webm'
-  ];
-  
-  if (!validMimes.includes(file.mimetype)) {
-    return cb(new Error('Invalid file type. Only video files are allowed.'), false);
-  }
-  cb(null, true);
-};
-
 const upload = multer({
-  storage,
-  fileFilter,
-  limits: { 
-    fileSize: 500 * 1024 * 1024 // 500MB
+  storage: storage,
+  limits: {
+    fileSize: 500 * 1024 * 1024 // 500MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedMimes = ['video/mp4', 'video/avi', 'video/mov', 'video/wmv', 'video/flv'];
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only video files are allowed.'));
+    }
   }
 }).single('video');
 
 // Video renditions configuration
 const renditions = [
   {
-    resolution: '640x360',
-    bandwidth: '800k',
-    audioBitrate: '96k',
-    playlistName: '360p.m3u8',
-    folderName: '360p'
-  },
-  {
-    resolution: '854x480',
-    bandwidth: '1400k',
+    resolution: '1920x1080',
+    bandwidth: '5000k',
     audioBitrate: '128k',
-    playlistName: '480p.m3u8',
-    folderName: '480p'
+    folderName: '1080p',
+    playlistName: 'index.m3u8'
   },
   {
     resolution: '1280x720',
-    bandwidth: '2800k',
-    audioBitrate: '128k',
-    playlistName: '720p.m3u8',
-    folderName: '720p'
+    bandwidth: '3000k',
+    audioBitrate: '96k',
+    folderName: '720p',
+    playlistName: 'index.m3u8'
+  },
+  {
+    resolution: '854x480',
+    bandwidth: '1500k',
+    audioBitrate: '96k',
+    folderName: '480p',
+    playlistName: 'index.m3u8'
   }
 ];
 
-// Improved getVideoDuration with timeout
+// Function to get video duration
 const getVideoDuration = (filePath) => {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      reject(new Error('FFprobe timed out after 30 seconds'));
+      reject(new Error('Duration detection timeout'));
     }, 30000);
 
     ffmpeg.ffprobe(filePath, (err, metadata) => {
       clearTimeout(timeout);
-      if (err) return reject(err);
-      resolve(metadata.format.duration);
+      if (err) {
+        reject(err);
+      } else {
+        resolve(Math.round(metadata.format.duration));
+      }
     });
   });
 };
 
-// Enhanced upload endpoint
+// Video upload and processing route
 router.post('/upload', (req, res) => {
   upload(req, res, async (err) => {
     let inputFilePath = req.file?.path;
@@ -151,8 +101,14 @@ router.post('/upload', (req, res) => {
         throw new Error("No file uploaded");
       }
 
+      console.log('📤 File uploaded:', req.file.originalname);
+      console.log('📁 Temporary path:', inputFilePath);
+
       const videoId = new mongoose.Types.ObjectId();
       outputDir = path.join(uploadDir, videoId.toString());
+
+      console.log('🎬 Processing video with ID:', videoId);
+      console.log('📂 Output directory:', outputDir);
 
       // Create output directory
       await fsp.mkdir(outputDir, { recursive: true });
@@ -165,7 +121,9 @@ router.post('/upload', (req, res) => {
           // Create rendition directory
           fsp.mkdir(renditionDir, { recursive: true })
             .then(() => {
-              const command = ffmpeg(req.file.path)
+              console.log(`🔄 Starting ${rendition.resolution} processing...`);
+              
+              const command = ffmpeg(inputFilePath)
                 .outputOptions([
                   '-c:v libx264',
                   '-c:a aac',
@@ -185,17 +143,19 @@ router.post('/upload', (req, res) => {
                 ])
                 .output(path.join(renditionDir, rendition.playlistName))
                 .on('start', (commandLine) => {
-                  console.log(`Started processing ${rendition.resolution}: ${commandLine}`);
+                  console.log(`🎯 Started processing ${rendition.resolution}`);
                 })
                 .on('progress', (progress) => {
-                  console.log(`Processing ${rendition.resolution}: ${Math.floor(progress.percent)}% done`);
+                  if (progress.percent) {
+                    console.log(`⏳ Processing ${rendition.resolution}: ${Math.floor(progress.percent)}% done`);
+                  }
                 })
                 .on('end', () => {
-                  console.log(`Finished processing ${rendition.resolution}`);
+                  console.log(`✅ Finished processing ${rendition.resolution}`);
                   resolve();
                 })
                 .on('error', (err) => {
-                  console.error(`Error processing ${rendition.resolution}:`, err);
+                  console.error(`❌ Error processing ${rendition.resolution}:`, err.message);
                   reject(err);
                 });
 
@@ -206,6 +166,7 @@ router.post('/upload', (req, res) => {
       });
 
       await Promise.all(processingPromises);
+      console.log('🎉 All renditions processed successfully');
 
       // Create master playlist
       const masterContent = [
@@ -219,9 +180,14 @@ router.post('/upload', (req, res) => {
 
       const masterPath = path.join(outputDir, 'master.m3u8');
       await fsp.writeFile(masterPath, masterContent);
+      console.log('📝 Master playlist created');
 
       // Get video duration with timeout
-      const duration = await getVideoDuration(req.file.path);
+      const duration = await getVideoDuration(inputFilePath);
+      console.log('⏱️ Video duration:', duration, 'seconds');
+
+      // Import Video model (make sure this is imported at the top of your file)
+      const Video = require('../models/Video'); // Adjust path as needed
 
       // Save to database
       const video = new Video({
@@ -229,7 +195,7 @@ router.post('/upload', (req, res) => {
         title: req.body.title || path.parse(req.file.originalname).name,
         description: req.body.description || '',
         originalFileName: req.file.originalname,
-        filePath: `${videoId}/master.m3u8`,
+        filePath: `${videoId}/master.m3u8`, // This will be served from /uploads/${videoId}/master.m3u8
         fileSize: req.file.size,
         mimeType: req.file.mimetype,
         duration: duration,
@@ -241,43 +207,50 @@ router.post('/upload', (req, res) => {
       });
 
       await video.save();
+      console.log('💾 Video saved to database');
 
       // Cleanup original file
       if (inputFilePath) {
         try {
           await fsp.unlink(inputFilePath);
+          console.log('🗑️ Original file cleaned up');
         } catch (cleanupErr) {
-          console.error('Original file cleanup error:', cleanupErr);
+          console.error('⚠️ Original file cleanup error:', cleanupErr);
         }
       }
 
+      // Return success response
       res.status(201).json({
         success: true,
         message: "Video processed successfully",
         video: {
           ...video.toObject(),
-          hlsPlaylist: `/api/videos/stream/${video._id}/master.m3u8`
+          // This URL should match your server setup
+          hlsPlaylist: `/uploads/${video._id}/master.m3u8`, // Direct access to uploads
+          streamingUrl: `/api/videos/stream/${video._id}/master.m3u8` // If you have a streaming route
         }
       });
 
     } catch (error) {
-      console.error('Upload error:', error);
+      console.error('❌ Upload error:', error);
       
       // Comprehensive cleanup on error
       const cleanup = async () => {
         if (inputFilePath && fs.existsSync(inputFilePath)) {
           try {
             await fsp.unlink(inputFilePath);
+            console.log('🗑️ Input file cleaned up after error');
           } catch (err) {
-            console.error('Error deleting input file:', err);
+            console.error('⚠️ Error deleting input file:', err);
           }
         }
         
         if (outputDir && fs.existsSync(outputDir)) {
           try {
             await fsp.rm(outputDir, { recursive: true, force: true });
+            console.log('🗑️ Output directory cleaned up after error');
           } catch (err) {
-            console.error('Error deleting output directory:', err);
+            console.error('⚠️ Error deleting output directory:', err);
           }
         }
       };
@@ -293,161 +266,92 @@ router.post('/upload', (req, res) => {
   });
 });
 
-// Stream video endpoint
-router.get('/stream/:id/:filename(*)', async (req, res) => {
-  try {
-    const { id, filename = 'master.m3u8' } = req.params;
-    
-    console.log(`Stream request for video ${id}, file: ${filename}`);
-
-    // Find video in database
-    const video = await Video.findById(id);
-    if (!video) {
-      console.error('Video not found in database');
-      return res.status(404).json({ error: 'Video not found' });
-    }
-
-    // Build file path
-    let filePath;
-    if (filename === 'master.m3u8') {
-      filePath = path.join(uploadDir, video.filePath);
-    } else {
-      const videoDir = path.dirname(path.join(uploadDir, video.filePath));
-      filePath = path.join(videoDir, filename);
-    }
-
-    console.log('Attempting to serve file:', filePath);
-
-    // Verify file exists
-    try {
-      await fsp.access(filePath);
-    } catch (err) {
-      console.error('File access error:', err);
-      return res.status(404).json({ 
-        error: 'File not found',
-        details: {
-          requestedPath: filePath,
-          videoId: id,
-          filename: filename
-        }
-      });
-    }
-
-    
-
-    // Set proper content type
-    const contentType = filename.endsWith('.m3u8') 
-      ? 'application/vnd.apple.mpegurl'
-      : filename.endsWith('.ts') 
-        ? 'video/MP2T'
-        : 'application/octet-stream';
-
-    // Set headers
-    res.set({
-      'Content-Type': contentType,
-      'Cache-Control': 'no-store, no-cache, must-revalidate',
-      'Access-Control-Allow-Origin': '*'
-    });
-
-    // Stream the file
-    const stream = fs.createReadStream(filePath);
-    stream.on('error', (err) => {
-      console.error('Stream error:', err);
-      res.status(500).end();
-    });
-    stream.pipe(res);
-
-  } catch (error) {
-    console.error('Stream endpoint error:', error);
-    res.status(500).json({ 
-      error: 'Internal server error',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  }
-});
-
-// Helper function to debug directory contents
-async function getDirectoryContents(dirPath) {
-  try {
-    return await fsp.readdir(dirPath);
-  } catch (err) {
-    return `Could not read directory: ${err.message}`;
-  }
-}
-
-// Get all videos
+// Route to get all videos
 router.get('/', async (req, res) => {
   try {
+    const Video = require('../models/Video');
     const videos = await Video.find().sort({ createdAt: -1 });
+    
+    const videosWithUrls = videos.map(video => ({
+      ...video.toObject(),
+      hlsPlaylist: `/uploads/${video._id}/master.m3u8`,
+      streamingUrl: `/api/videos/stream/${video._id}/master.m3u8`
+    }));
+    
     res.json({
       success: true,
-      count: videos.length,
-      videos: videos.map(video => ({
-        ...video.toObject(),
-        hlsPlaylist: `/api/videos/stream/${video._id}/master.m3u8`
-      }))
+      videos: videosWithUrls
     });
   } catch (error) {
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: "Error fetching videos",
-      error: error.message 
+      error: error.message
     });
   }
 });
 
-// Get single video
+// Route to get single video
 router.get('/:id', async (req, res) => {
   try {
+    const Video = require('../models/Video');
     const video = await Video.findById(req.params.id);
+    
     if (!video) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        message: "Video not found" 
+        error: 'Video not found'
       });
     }
-
+    
     res.json({
       success: true,
       video: {
         ...video.toObject(),
-        hlsPlaylist: `/api/videos/stream/${video._id}/master.m3u8`
+        hlsPlaylist: `/uploads/${video._id}/master.m3u8`,
+        streamingUrl: `/api/videos/stream/${video._id}/master.m3u8`
       }
     });
   } catch (error) {
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: "Error fetching video",
-      error: error.message 
+      error: error.message
     });
   }
 });
 
-// Delete video
-router.delete('/:id', async (req, res) => {
+// Streaming route (optional - if you want a separate streaming endpoint)
+router.get('/stream/:id/:file(*)', async (req, res) => {
   try {
-    const video = await Video.findByIdAndDelete(req.params.id);
-    if (!video) {
-      return res.status(404).json({ 
+    const { id, file } = req.params;
+    const filePath = path.join(uploadDir, id, file);
+    
+    console.log('🎬 Streaming request for:', filePath);
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
         success: false,
-        message: "Video not found" 
+        error: 'File not found'
       });
     }
-
-    const videoDir = path.join(uploadDir, path.dirname(video.filePath));
-    if (fs.existsSync(videoDir)) {
-      await fsp.rm(videoDir, { recursive: true, force: true });
+    
+    // Set appropriate content type
+    if (file.endsWith('.m3u8')) {
+      res.set('Content-Type', 'application/vnd.apple.mpegurl');
+    } else if (file.endsWith('.ts')) {
+      res.set('Content-Type', 'video/mp2t');
     }
-
-    res.json({ 
-      success: true,
-      message: "Video deleted successfully" 
-    });
+    
+    // Set caching headers
+    res.set('Cache-Control', 'no-cache');
+    
+    // Send file
+    res.sendFile(filePath);
+    
   } catch (error) {
-    res.status(500).json({ 
+    console.error('Streaming error:', error);
+    res.status(500).json({
       success: false,
-      message: "Error deleting video",
-      error: error.message 
+      error: 'Streaming error'
     });
   }
 });
