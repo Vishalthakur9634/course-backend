@@ -44,16 +44,69 @@ app.use((req, res, next) => {
 // Configure allowed origins
 const allowedOrigins = [
   'https://course-fronten.netlify.app',
+  'https://course-fronte.netlify.app', // Added the correct frontend URL from error
   'http://localhost:3000',
   process.env.FRONTEND_URL
 ].filter(Boolean);
 
 console.log('🔧 Server starting with allowed origins:', allowedOrigins);
 
-// CORS CONFIGURATION WITH EXTENSIVE LOGGING
+// VIDEO-SPECIFIC CORS MIDDLEWARE (for streaming and video endpoints)
+app.use('/api/videos', cors({
+  origin: function (origin, callback) {
+    console.log('\n🎥 VIDEO CORS CHECK:');
+    console.log('Request origin:', origin);
+    console.log('Allowed origins:', allowedOrigins);
+    
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) {
+      console.log('✅ No origin - ALLOWED');
+      return callback(null, true);
+    }
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.includes(origin)) {
+      console.log('✅ Origin ALLOWED:', origin);
+      callback(null, true);
+    } else {
+      console.log('❌ Origin BLOCKED:', origin);
+      console.log('Available origins:', allowedOrigins);
+      callback(new Error(`CORS blocked: ${origin}`));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'Cache-Control', // Added for video streaming
+    'Pragma',        // Added for caching
+    'Expires',       // Added for caching
+    'If-Modified-Since', // Added for conditional requests
+    'If-None-Match',     // Added for conditional requests
+    'Range',         // Added for partial content requests (video seeking)
+    'Accept-Ranges', // Added for range requests
+    'Content-Range'  // Added for partial content responses
+  ],
+  exposedHeaders: [
+    'Content-Length', 
+    'Content-Range',
+    'Accept-Ranges',
+    'Cache-Control',
+    'Expires',
+    'Last-Modified',
+    'ETag'
+  ],
+  optionsSuccessStatus: 200
+}));
+
+// GENERAL CORS CONFIGURATION (for non-video routes)
 app.use(cors({
   origin: function (origin, callback) {
-    console.log('\n🔍 CORS CHECK:');
+    console.log('\n🔍 GENERAL CORS CHECK:');
     console.log('Request origin:', origin);
     console.log('Allowed origins:', allowedOrigins);
     
