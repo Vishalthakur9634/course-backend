@@ -29,176 +29,73 @@ const connectDB = async () => {
 // Connect to database
 connectDB();
 
-// Enhanced CORS configuration for different endpoints
-const generalCorsOptions = {
-  origin: [
+// COMPREHENSIVE REQUEST LOGGING
+app.use((req, res, next) => {
+  console.log('\n=== INCOMING REQUEST ===');
+  console.log(`${req.method} ${req.url}`);
+  console.log('Origin:', req.headers.origin);
+  console.log('User-Agent:', req.headers['user-agent']);
+  console.log('Content-Type:', req.headers['content-type']);
+  console.log('All headers:', JSON.stringify(req.headers, null, 2));
+  console.log('========================\n');
+  next();
+});
 
-    'https://course-fronte.netlify.app', // Added Netlify frontend URL
-    process.env.FRONTEND_URL // Using environment variable
-  ],
+// Configure allowed origins
+const allowedOrigins = [
+  'https://course-fronten.netlify.app',
+  'http://localhost:3000',
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
+console.log('🔧 Server starting with allowed origins:', allowedOrigins);
+
+// CORS CONFIGURATION WITH EXTENSIVE LOGGING
+app.use(cors({
+  origin: function (origin, callback) {
+    console.log('\n🔍 CORS CHECK:');
+    console.log('Request origin:', origin);
+    console.log('Allowed origins:', allowedOrigins);
+    
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) {
+      console.log('✅ No origin - ALLOWED');
+      return callback(null, true);
+    }
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.includes(origin)) {
+      console.log('✅ Origin ALLOWED:', origin);
+      callback(null, true);
+    } else {
+      console.log('❌ Origin BLOCKED:', origin);
+      console.log('Available origins:', allowedOrigins);
+      callback(new Error(`CORS blocked: ${origin}`));
+    }
+  },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
     'Content-Type', 
     'Authorization', 
     'X-Requested-With',
     'Accept',
-    'Accept-Language',
-    'Content-Language',
-    'Cache-Control',
-    'Pragma',
-    'Expires',
-    'If-Modified-Since',
-    'If-None-Match',
-    'If-Range',
-    'Range',
-    'User-Agent'
+    'Origin'
   ],
-  exposedHeaders: [
-    'Content-Length',
-    'Content-Range',
-    'Accept-Ranges',
-    'Content-Type',
-    'Cache-Control',
-    'Last-Modified',
-    'ETag'
-  ],
-  optionsSuccessStatus: 200,
-  maxAge: 86400 // 24 hours preflight cache
-};
+  exposedHeaders: ['Content-Length', 'Content-Range'],
+  optionsSuccessStatus: 200
+}));
 
-// Special CORS configuration for video streaming endpoints
-const videoCorsOptions = {
-  origin: [
-
-    'https://course-fronte.netlify.app', // Added Netlify frontend URL
-    process.env.FRONTEND_URL
-  ],
-  credentials: true,
-  methods: ['GET', 'HEAD', 'OPTIONS'],
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'X-Requested-With',
-    'Accept',
-    'Accept-Language',
-    'Content-Language',
-    'Cache-Control',
-    'Pragma',
-    'Expires',
-    'If-Modified-Since',
-    'If-None-Match',
-    'If-Range',
-    'Range',
-    'User-Agent',
-    'Access-Control-Request-Method',
-    'Access-Control-Request-Headers'
-  ],
-  exposedHeaders: [
-    'Content-Length',
-    'Content-Range',
-    'Accept-Ranges',
-    'Content-Type',
-    'Cache-Control',
-    'Last-Modified',
-    'ETag',
-    'X-Content-Duration'
-  ],
-  optionsSuccessStatus: 200,
-  maxAge: 86400
-};
-
-// Apply general CORS middleware first
-app.use(cors(generalCorsOptions));
-
-// Enhanced logging for debugging CORS issues
-app.use(morgan('combined'));
-
-// Custom middleware to handle CORS for video endpoints specifically
-app.use('/api/videos/stream', (req, res, next) => {
-  // Set CORS headers explicitly for video streaming
-  const origin = req.headers.origin;
-  const allowedOrigins = [
-
-      'https://course-fronte.netlify.app', // Added Netlify frontend URL
-    process.env.FRONTEND_URL
-  ];
-  
-  if (allowedOrigins.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  }
-  
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', [
-    'Content-Type',
-    'Authorization',
-    'X-Requested-With',
-    'Accept',
-    'Accept-Language',
-    'Content-Language',
-    'Cache-Control',
-    'Pragma',
-    'Expires',
-    'If-Modified-Since',
-    'If-None-Match',
-    'If-Range',
-    'Range',
-    'User-Agent'
-  ].join(', '));
-  
-  res.setHeader('Access-Control-Expose-Headers', [
-    'Content-Length',
-    'Content-Range',
-    'Accept-Ranges',
-    'Content-Type',
-    'Cache-Control',
-    'Last-Modified',
-    'ETag',
-    'X-Content-Duration'
-  ].join(', '));
-  
-  res.setHeader('Access-Control-Max-Age', '86400');
-  
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
-  next();
-});
-
-// Additional middleware for handling Range requests (important for video streaming)
+// RESPONSE LOGGING
 app.use((req, res, next) => {
-  // Enable CORS for all requests
-  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Allow-Headers', [
-    'Origin',
-    'X-Requested-With',
-    'Content-Type',
-    'Accept',
-    'Authorization',
-    'Cache-Control',
-    'Pragma',
-    'Expires',
-    'If-Modified-Since',
-    'If-None-Match',
-    'If-Range',
-    'Range',
-    'User-Agent'
-  ].join(', '));
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH');
-  res.header('Access-Control-Expose-Headers', [
-    'Content-Length',
-    'Content-Range',
-    'Accept-Ranges',
-    'Content-Type',
-    'Cache-Control',
-    'Last-Modified',
-    'ETag'
-  ].join(', '));
-  
+  const originalSend = res.send;
+  res.send = function(data) {
+    console.log('\n=== OUTGOING RESPONSE ===');
+    console.log(`Status: ${res.statusCode}`);
+    console.log('Headers:', JSON.stringify(res.getHeaders(), null, 2));
+    console.log('========================\n');
+    originalSend.call(this, data);
+  };
   next();
 });
 
@@ -207,147 +104,125 @@ app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Serve uploaded files with proper headers for video streaming
-app.use('/uploads', (req, res, next) => {
-  // Set appropriate headers for video files
-  if (req.path.endsWith('.mp4') || req.path.endsWith('.m3u8') || req.path.endsWith('.ts')) {
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Type', req.path.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-  }
-  next();
-}, express.static(path.join(__dirname, 'uploads')));
+// MANUAL TEST ROUTE TO VERIFY CORS
+app.all('/api/test', (req, res) => {
+  console.log('🧪 Test route hit!');
+  res.json({
+    success: true,
+    message: `${req.method} request successful`,
+    origin: req.headers.origin,
+    timestamp: new Date().toISOString(),
+    cors_headers: {
+      'access-control-allow-origin': res.get('Access-Control-Allow-Origin'),
+      'access-control-allow-credentials': res.get('Access-Control-Allow-Credentials')
+    }
+  });
+});
 
-// Handle all OPTIONS requests globally
-app.options('*', (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH');
-  res.setHeader('Access-Control-Allow-Headers', [
-    'Origin',
-    'X-Requested-With',
-    'Content-Type',
-    'Accept',
-    'Authorization',
-    'Cache-Control',
-    'Pragma',
-    'Expires',
-    'If-Modified-Since',
-    'If-None-Match',
-    'If-Range',
-    'Range',
-    'User-Agent'
-  ].join(', '));
-  res.setHeader('Access-Control-Max-Age', '86400');
-  res.status(200).end();
+// SIMPLE AUTH TEST ROUTE (to isolate the issue)
+app.post('/api/auth/test-register', (req, res) => {
+  console.log('🧪 Auth test route hit!');
+  res.json({
+    success: true,
+    message: 'Test register endpoint working',
+    origin: req.headers.origin,
+    body: req.body
+  });
 });
 
 // Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/videos', videoRoutes);
+app.use('/api/auth', (req, res, next) => {
+  console.log('🔐 Auth route middleware hit:', req.method, req.url);
+  next();
+}, authRoutes);
 
-// Basic route for testing
-app.get('/', (req, res) => {
-  res.json({
-    success: true,
-    message: 'API is running successfully',
-    cors: 'Enhanced CORS configuration active'
-  });
-});
+app.use('/api/videos', videoRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({
     success: true,
     message: 'Server is healthy',
-    timestamp: new Date().toISOString(),
     cors: {
-      origin: req.headers.origin,
-      userAgent: req.headers['user-agent'],
-      method: req.method
-    }
+      allowedOrigins: allowedOrigins,
+      yourOrigin: req.headers.origin,
+      isAllowed: allowedOrigins.includes(req.headers.origin)
+    },
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// Enhanced error handler with CORS support
-app.use((err, req, res, next) => {
-  let error = { ...err };
-  error.message = err.message;
-
-  // Ensure CORS headers are set even for errors
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-
-  console.error('Error:', err);
-
-  // Mongoose errors
-  if (err.name === 'CastError') {
-    const message = 'Resource not found';
-    error = { message, statusCode: 404 };
-  } else if (err.code === 11000) {
-    const message = 'Duplicate field value entered';
-    error = { message, statusCode: 400 };
-  } else if (err.name === 'ValidationError') {
-    const message = Object.values(err.errors).map(val => val.message);
-    error = { message, statusCode: 400 };
-  }
-
-  res.status(error.statusCode || 500).json({
+// Catch-all for debugging missing routes
+app.use('/api/*', (req, res) => {
+  console.log('🚫 Unmatched API route:', req.method, req.url);
+  res.status(404).json({
     success: false,
-    error: error.message || 'Server Error'
+    error: `API endpoint not found: ${req.method} ${req.url}`,
+    availableRoutes: [
+      'GET /api/health',
+      'ALL /api/test',
+      'POST /api/auth/test-register',
+      'POST /api/auth/register (from authRoutes)'
+    ]
   });
 });
 
-// Handle unhandled routes
-app.all('*', (req, res) => {
-  // Ensure CORS headers for 404s
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
+// Global error handler with enhanced logging
+app.use((err, req, res, next) => {
+  console.error('\n❌ ERROR HANDLER TRIGGERED:');
+  console.error('Error message:', err.message);
+  console.error('Error stack:', err.stack);
+  console.error('Request URL:', req.url);
+  console.error('Request method:', req.method);
+  console.error('Request origin:', req.headers.origin);
+  
+  res.status(err.statusCode || 500).json({
+    success: false,
+    error: err.message || 'Internal Server Error',
+    url: req.url,
+    method: req.method
+  });
+});
+
+// 404 handler
+app.use((req, res) => {
+  console.log(`🔍 404: ${req.method} ${req.url} from ${req.headers.origin}`);
   
   res.status(404).json({
     success: false,
-    error: `Route ${req.originalUrl} not found`
+    error: `Endpoint not found: ${req.method} ${req.url}`
   });
 });
 
 const PORT = process.env.PORT || 3000;
-
 const server = app.listen(PORT, () => {
-  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
-  console.log('Enhanced CORS configuration loaded');
-  console.log('Video streaming CORS headers configured');
-});
-
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (err, promise) => {
-  console.log(`Error: ${err.message}`);
-  server.close(() => process.exit(1));
+  console.log('\n🚀 SERVER STARTED');
+  console.log(`Port: ${PORT}`);
+  console.log('Allowed origins:', allowedOrigins);
+  console.log('Environment:', process.env.NODE_ENV || 'development');
+  console.log('\n📋 Test these endpoints:');
+  console.log(`- GET  https://course-backends.onrender.com/api/health`);
+  console.log(`- POST https://course-backends.onrender.com/api/test`);
+  console.log(`- POST https://course-backends.onrender.com/api/auth/test-register`);
+  console.log('========================\n');
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
+  console.log('SIGTERM received, shutting down gracefully');
   server.close(() => {
-    console.log('HTTP server closed');
     mongoose.connection.close(false, () => {
-      console.log('MongoDB connection closed');
       process.exit(0);
     });
   });
 });
 
 process.on('SIGINT', () => {
-  console.log('SIGINT signal received: closing HTTP server');
+  console.log('SIGINT received, shutting down gracefully');
   server.close(() => {
-    console.log('HTTP server closed');
     mongoose.connection.close(false, () => {
-      console.log('MongoDB connection closed');
       process.exit(0);
     });
   });
 });
-
-// Export the Express app for Vercel
-module.exports = app;
