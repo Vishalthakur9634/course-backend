@@ -1,408 +1,372 @@
 const express = require('express');
-const multer = require('multer');
-const ffmpeg = require('fluent-ffmpeg');
+const cors = require('cors');
+const cookieParser = require('cookie-parser');
+const morgan = require('morgan');
 const mongoose = require('mongoose');
+const dotenv = require('dotenv');
 const path = require('path');
-const fs = require('fs');
-const fsp = require('fs').promises;
 
-const router = express.Router();
+// Load environment variables first
+dotenv.config({ path: './config/config.env' });
 
-// Import Video model (adjust path as needed)
-const Video = require('./models/Video');
+const app = express();
+
+// Enhanced error handling for uncaught exceptions
+process.on('uncaughtException', (err) => {
+  console.error('💥 UNCAUGHT EXCEPTION! Shutting down...');
+  console.error('Error name:', err.name);
+  console.error('Error message:', err.message);
+  console.error('Stack trace:', err.stack);
+  process.exit(1);
+});
+
+// Enhanced error handling for unhandled promise rejections
+process.on('unhandledRejection', (err) => {
+  console.error('💥 UNHANDLED REJECTION! Shutting down...');
+  console.error('Error name:', err.name);
+  console.error('Error message:', err.message);
+  if (err.stack) console.error('Stack trace:', err.stack);
+  
+  if (server) {
+    server.close(() => {
+      process.exit(1);
+    });
+  } else {
+    process.exit(1);
+  }
+});
+
+// Database connection with retry logic
+const connectDB = async () => {
+  try {
+    console.log('🔄 Attempting to connect to MongoDB...');
+    console.log('MongoDB URI:', process.env.MONGO_URI ? 'Set (hidden for security)' : 'NOT SET');
+    
+    if (!process.env.MONGO_URI) {
+      throw new Error('MONGO_URI environment variable is not set');
+    }
+
+    const conn = await mongoose.connect(process.env.MONGO_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      serverSelectionTimeoutMS: 10000, // 10 seconds
+      socketTimeoutMS: 45000, // 45 seconds
+      family: 4 // Use IPv4, skip trying IPv6
+    });
+    
+    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+    console.log(`📊 Database Name: ${conn.connection.name}`);
+    
+    return conn;
+  } catch (err) {
+    console.error('❌ Database connection error:', err.message);
+    console.error('Full error:', err);
+    
+    // Retry connection after 5 seconds
+    console.log('🔄 Retrying database connection in 5 seconds...');
+    setTimeout(connectDB, 5000);
+  }
+};
+
+// Initialize database connection
+connectDB();
 
 // Ensure uploads directory exists
-const uploadDir = path.join(__dirname, '../uploads');
+const uploadDir = path.join(__dirname, 'uploads');
+const fs = require('fs');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
   console.log('📁 Created uploads directory:', uploadDir);
 }
 
-// Multer configuration for file uploads
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
+// Configure allowed origins
+const allowedOrigins = [
+  'https://course-fronten.netlify.app',
+  'https://course-fronte.netlify.app',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:3000',
+  process.env.FRONTEND_URL
+].filter(Boolean);
 
-const upload = multer({
-  storage: storage,
-  limits: {
-    fileSize: 500 * 1024 * 1024 // 500MB limit
-  },
-  fileFilter: (req, file, cb) => {
-    const allowedMimes = ['video/mp4', 'video/avi', 'video/mov', 'video/wmv', 'video/flv', 'video/quicktime'];
-    if (allowedMimes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Only video files are allowed.'));
+console.log('🔧 Server starting with allowed origins:', allowedOrigins);
+
+// Enhanced CORS configuration
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) {
+      return callback(null, true);
     }
-  }
-}).single('video');
-
-// Simplified renditions for faster processing and stability
-const renditions = [
-  {
-    resolution: '1280x720',
-    bandwidth: '2500k',
-    audioBitrate: '128k',
-    folderName: '720p',
-    playlistName: 'index.m3u8'
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log('❌ CORS blocked origin:', origin);
+      callback(new Error(`CORS blocked: ${origin}`));
+    }
   },
-  {
-    resolution: '854x480',
-    bandwidth: '1200k',
-    audioBitrate: '96k',
-    folderName: '480p',
-    playlistName: 'index.m3u8'
-  }
-];
-
-// Function to get video duration with timeout
-const getVideoDuration = (filePath) => {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      console.warn('Duration detection timeout, defaulting to 0');
-      resolve(0);
-    }, 20000); // 20 seconds timeout
-
-    ffmpeg.ffprobe(filePath, (err, metadata) => {
-      clearTimeout(timeout);
-      if (err) {
-        console.error('FFprobe error:', err);
-        resolve(0); // Default to 0 if cannot get duration
-      } else {
-        const duration = metadata?.format?.duration || 0;
-        resolve(Math.round(duration));
-      }
-    });
-  });
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With',
+    'Accept',
+    'Accept-Language',
+    'Content-Language',
+    'Origin',
+    'Cache-Control',
+    'Pragma',
+    'Expires',
+    'If-Modified-Since',
+    'If-None-Match',
+    'If-Range',
+    'Range',
+    'Accept-Ranges',
+    'Content-Range',
+    'User-Agent'
+  ],
+  exposedHeaders: [
+    'Content-Length',
+    'Content-Range',
+    'Accept-Ranges',
+    'Cache-Control',
+    'Expires',
+    'Last-Modified',
+    'ETag',
+    'X-Content-Duration'
+  ],
+  optionsSuccessStatus: 200,
+  maxAge: 86400
 };
 
-// Test route to verify the router is working
-router.get('/test', (req, res) => {
-  console.log('🧪 Video test route hit!');
+// Apply CORS middleware
+app.use(cors(corsOptions));
+
+// Additional CORS middleware for video routes
+app.use('/api/videos', cors(corsOptions));
+
+// Logging middleware
+if (process.env.NODE_ENV === 'development') {
+  app.use(morgan('dev'));
+} else {
+  app.use(morgan('combined'));
+}
+
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`📥 ${new Date().toISOString()} - ${req.method} ${req.url}`);
+  next();
+});
+
+// Body parsing middleware
+app.use(cookieParser());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Serve uploaded files
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  setHeaders: (res, path) => {
+    if (path.endsWith('.m3u8')) {
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Cache-Control', 'no-cache');
+    } else if (path.endsWith('.ts')) {
+      res.setHeader('Content-Type', 'video/mp2t');
+      res.setHeader('Accept-Ranges', 'bytes');
+    }
+  }
+}));
+
+// Health check endpoint
+app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'Video routes are working',
-    uploadDir: uploadDir,
-    timestamp: new Date().toISOString()
+    message: 'Course Backend API is running',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    nodeVersion: process.version
   });
 });
 
-// Main upload route - KEEPS THE SAME RESPONSE FORMAT AS YOUR ORIGINAL
-router.post('/upload', (req, res) => {
-  console.log('🚀 Upload route hit!');
+app.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Server is healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    database: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
+  });
+});
+
+// API health check
+app.get('/api/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'API is healthy',
+    cors: {
+      allowedOrigins: allowedOrigins,
+      yourOrigin: req.headers.origin,
+      isAllowed: allowedOrigins.includes(req.headers.origin)
+    },
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Import routes with error handling
+let authRoutes, videoRoutes;
+
+try {
+  authRoutes = require('./routes/auth');
+  console.log('✅ Auth routes loaded successfully');
+} catch (error) {
+  console.error('❌ Error loading auth routes:', error.message);
+  // Create a dummy router to prevent crashes
+  authRoutes = express.Router();
+  authRoutes.all('*', (req, res) => {
+    res.status(500).json({
+      success: false,
+      error: 'Auth routes not available'
+    });
+  });
+}
+
+try {
+  videoRoutes = require('./routes/videoRoutes');
+  console.log('✅ Video routes loaded successfully');
+} catch (error) {
+  console.error('❌ Error loading video routes:', error.message);
+  // Create a dummy router to prevent crashes
+  videoRoutes = express.Router();
+  videoRoutes.all('*', (req, res) => {
+    res.status(500).json({
+      success: false,
+      error: 'Video routes not available'
+    });
+  });
+}
+
+// Apply routes
+app.use('/api/auth', authRoutes);
+app.use('/api/videos', videoRoutes);
+
+// Test route
+app.get('/api/test', (req, res) => {
+  res.json({
+    success: true,
+    message: 'API test endpoint working',
+    timestamp: new Date().toISOString(),
+    headers: req.headers
+  });
+});
+
+// Handle 404 for API routes
+app.use('/api/*', (req, res) => {
+  console.log(`🚫 API route not found: ${req.method} ${req.originalUrl}`);
+  res.status(404).json({
+    success: false,
+    error: `API endpoint not found: ${req.method} ${req.originalUrl}`,
+    availableEndpoints: [
+      'GET /',
+      'GET /health',
+      'GET /api/health',
+      'GET /api/test',
+      'POST /api/auth/*',
+      'POST /api/videos/*'
+    ]
+  });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('🔥 Global error handler triggered:');
+  console.error('Error name:', err.name);
+  console.error('Error message:', err.message);
+  console.error('Request URL:', req.url);
+  console.error('Request method:', req.method);
   
-  // Increase timeout for this specific route
-  req.setTimeout(300000); // 5 minutes
-  res.setTimeout(300000); // 5 minutes
+  // Don't send stack trace in production
+  const errorResponse = {
+    success: false,
+    error: err.message || 'Internal Server Error',
+    timestamp: new Date().toISOString()
+  };
 
-  upload(req, res, async (err) => {
-    let inputFilePath = req.file?.path;
-    let outputDir;
+  if (process.env.NODE_ENV === 'development') {
+    errorResponse.stack = err.stack;
+  }
 
-    try {
-      // Handle upload errors
-      if (err instanceof multer.MulterError) {
-        console.error('Multer error:', err);
-        if (err.code === 'LIMIT_FILE_SIZE') {
-          throw new Error('File size too large. Maximum size is 500MB.');
-        }
-        throw new Error(`Upload error: ${err.message}`);
-      } else if (err) {
-        console.error('Upload error:', err);
-        throw err;
-      }
-      
-      if (!req.file) {
-        throw new Error("No file uploaded");
-      }
+  res.status(err.statusCode || 500).json(errorResponse);
+});
 
-      console.log('📤 File uploaded:', req.file.originalname);
-      console.log('📁 Temporary path:', inputFilePath);
-
-      const videoId = new mongoose.Types.ObjectId();
-      outputDir = path.join(uploadDir, videoId.toString());
-
-      console.log('🎬 Processing video with ID:', videoId);
-      console.log('📂 Output directory:', outputDir);
-
-      // Create output directory
-      await fsp.mkdir(outputDir, { recursive: true });
-
-      // Get video duration first
-      let duration = 0;
-      try {
-        duration = await getVideoDuration(inputFilePath);
-        console.log('⏱️ Video duration:', duration, 'seconds');
-      } catch (durationError) {
-        console.warn('⚠️ Could not get video duration:', durationError.message);
-      }
-
-      // Process renditions with optimized settings for stability
-      const processingPromises = renditions.map((rendition, index) => {
-        const renditionDir = path.join(outputDir, rendition.folderName);
-        
-        return new Promise((resolve, reject) => {
-          // Add delay between processing to prevent resource conflicts
-          setTimeout(() => {
-            fsp.mkdir(renditionDir, { recursive: true })
-              .then(() => {
-                console.log(`🔄 Starting ${rendition.resolution} processing...`);
-                
-                const command = ffmpeg(inputFilePath)
-                  .outputOptions([
-                    '-c:v libx264',
-                    '-c:a aac',
-                    '-profile:v baseline',
-                    '-level 3.0',
-                    '-pix_fmt yuv420p',
-                    '-crf 23',
-                    '-preset ultrafast', // Fastest preset for stability
-                    '-threads 1', // Single thread to prevent overload
-                    `-b:v ${rendition.bandwidth}`,
-                    `-b:a ${rendition.audioBitrate}`,
-                    `-vf scale=${rendition.resolution}:force_original_aspect_ratio=decrease,pad=${rendition.resolution}:(ow-iw)/2:(oh-ih)/2`,
-                    '-hls_time 6', // Longer segments for stability
-                    '-hls_list_size 0',
-                    '-hls_flags independent_segments',
-                    `-hls_segment_filename ${path.join(renditionDir, 'segment_%03d.ts')}`,
-                    '-f hls'
-                  ])
-                  .output(path.join(renditionDir, rendition.playlistName))
-                  .on('start', (commandLine) => {
-                    console.log(`🎯 Started processing ${rendition.resolution}`);
-                  })
-                  .on('progress', (progress) => {
-                    if (progress.percent && progress.percent > 0) {
-                      const percent = Math.floor(progress.percent);
-                      if (percent % 25 === 0) { // Log every 25%
-                        console.log(`⏳ Processing ${rendition.resolution}: ${percent}% done`);
-                      }
-                    }
-                  })
-                  .on('end', () => {
-                    console.log(`✅ Finished processing ${rendition.resolution}`);
-                    resolve();
-                  })
-                  .on('error', (err) => {
-                    console.error(`❌ Error processing ${rendition.resolution}:`, err.message);
-                    reject(err);
-                  });
-
-                command.run();
-              })
-              .catch(reject);
-          }, index * 2000); // 2 second delay between each rendition
-        });
-      });
-
-      try {
-        await Promise.all(processingPromises);
-        console.log('🎉 All renditions processed successfully');
-      } catch (processingError) {
-        console.error('Processing error:', processingError);
-        // Continue with single rendition if multiple fail
-        throw new Error('Video processing failed. Please try with a smaller file or different format.');
-      }
-
-      // Create master playlist
-      const masterContent = [
-        '#EXTM3U',
-        '#EXT-X-VERSION:6',
-        ...renditions.map(r => [
-          `#EXT-X-STREAM-INF:BANDWIDTH=${parseInt(r.bandwidth)*1000},RESOLUTION=${r.resolution},CODECS="avc1.64001f,mp4a.40.2"`,
-          `${r.folderName}/${r.playlistName}`
-        ].join('\n'))
-      ].join('\n');
-
-      const masterPath = path.join(outputDir, 'master.m3u8');
-      await fsp.writeFile(masterPath, masterContent);
-      console.log('📝 Master playlist created');
-
-      // Save to database
-      const video = new Video({
-        _id: videoId,
-        title: req.body.title || path.parse(req.file.originalname).name,
-        description: req.body.description || '',
-        originalFileName: req.file.originalname,
-        filePath: `${videoId}/master.m3u8`,
-        fileSize: req.file.size,
-        mimeType: req.file.mimetype,
-        duration: duration,
-        renditions: renditions.map(r => ({
-          resolution: r.resolution,
-          bandwidth: parseInt(r.bandwidth) * 1000,
-          playlistPath: `${videoId}/${r.folderName}/${r.playlistName}`
-        }))
-      });
-
-      await video.save();
-      console.log('💾 Video saved to database');
-
-      // Cleanup original file
-      if (inputFilePath) {
-        try {
-          await fsp.unlink(inputFilePath);
-          console.log('🗑️ Original file cleaned up');
-        } catch (cleanupErr) {
-          console.error('⚠️ Original file cleanup error:', cleanupErr);
-        }
-      }
-
-      // RETURN THE SAME FORMAT YOUR FRONTEND EXPECTS
-      res.status(201).json({
-        success: true,
-        message: "Video processed successfully",
-        video: {
-          ...video.toObject(),
-          hlsPlaylist: `/api/videos/stream/${video._id}/master.m3u8`
-        }
-      });
-
-    } catch (error) {
-      console.error('❌ Upload error:', error);
-      
-      // Comprehensive cleanup on error
-      const cleanup = async () => {
-        if (inputFilePath && fs.existsSync(inputFilePath)) {
-          try {
-            await fsp.unlink(inputFilePath);
-            console.log('🗑️ Input file cleaned up after error');
-          } catch (err) {
-            console.error('⚠️ Error deleting input file:', err);
-          }
-        }
-        
-        if (outputDir && fs.existsSync(outputDir)) {
-          try {
-            await fsp.rm(outputDir, { recursive: true, force: true });
-            console.log('🗑️ Output directory cleaned up after error');
-          } catch (err) {
-            console.error('⚠️ Error deleting output directory:', err);
-          }
-        }
-      };
-
-      await cleanup();
-
-      // Return error in the same format your frontend expects
-      if (!res.headersSent) {
-        res.status(500).json({ 
-          success: false,
-          error: error.message,
-          ...(process.env.NODE_ENV === 'development' && { stack: error.stack })
-        });
-      }
-    }
+// Handle all other routes
+app.use('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    error: `Route ${req.originalUrl} not found`,
+    message: 'This endpoint does not exist'
   });
 });
 
-// Route to get all videos - SAME FORMAT AS ORIGINAL
-router.get('/', async (req, res) => {
-  try {
-    const videos = await Video.find().sort({ createdAt: -1 });
-    
-    const videosWithUrls = videos.map(video => ({
-      ...video.toObject(),
-      hlsPlaylist: `/api/videos/stream/${video._id}/master.m3u8`
-    }));
-    
-    res.json({
-      success: true,
-      videos: videosWithUrls
-    });
-  } catch (error) {
-    console.error('Get videos error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
+// Port configuration
+const PORT = process.env.PORT || 3000;
 
-// Route to get single video - SAME FORMAT AS ORIGINAL
-router.get('/:id', async (req, res) => {
-  try {
-    const video = await Video.findById(req.params.id);
-    
-    if (!video) {
-      return res.status(404).json({
-        success: false,
-        error: 'Video not found'
-      });
-    }
-    
-    res.json({
-      success: true,
-      video: {
-        ...video.toObject(),
-        hlsPlaylist: `/api/videos/stream/${video._id}/master.m3u8`
-      }
-    });
-  } catch (error) {
-    console.error('Get single video error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
+// Start server with error handling
+let server;
+try {
+  server = app.listen(PORT, '0.0.0.0', () => {
+    console.log('\n🚀 ================================');
+    console.log('🚀 SERVER STARTED SUCCESSFULLY');
+    console.log('🚀 ================================');
+    console.log(`📍 Port: ${PORT}`);
+    console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🕐 Started at: ${new Date().toISOString()}`);
+    console.log(`📁 Uploads directory: ${uploadDir}`);
+    console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+    console.log('🚀 ================================\n');
+  });
 
-// Streaming route - MATCHES YOUR ORIGINAL PATTERN
-router.get('/stream/:id/:file(*)', async (req, res) => {
-  try {
-    const { id, file } = req.params;
-    const filePath = path.join(uploadDir, id, file);
-    
-    console.log('🎬 Streaming request for:', filePath);
-    
-    if (!fs.existsSync(filePath)) {
-      console.error('File not found:', filePath);
-      return res.status(404).json({
-        success: false,
-        error: 'File not found'
-      });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`❌ Port ${PORT} is already in use`);
+      process.exit(1);
+    } else {
+      console.error('❌ Server error:', err);
+      process.exit(1);
     }
-    
-    // Set appropriate content type and headers
-    if (file.endsWith('.m3u8')) {
-      res.set('Content-Type', 'application/vnd.apple.mpegurl');
-      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.set('Pragma', 'no-cache');
-      res.set('Expires', '0');
-    } else if (file.endsWith('.ts')) {
-      res.set('Content-Type', 'video/mp2t');
-      res.set('Accept-Ranges', 'bytes');
-    }
-    
-    // Send file
-    res.sendFile(filePath, (err) => {
-      if (err) {
-        console.error('Error sending file:', err);
-        if (!res.headersSent) {
-          res.status(500).json({
-            success: false,
-            error: 'Error streaming file'
-          });
-        }
-      }
-    });
-    
-  } catch (error) {
-    console.error('Streaming error:', error);
-    if (!res.headersSent) {
-      res.status(500).json({
-        success: false,
-        error: 'Streaming error'
-      });
-    }
-  }
-});
+  });
 
-module.exports = router;
+  // Graceful shutdown handling
+  const gracefulShutdown = (signal) => {
+    console.log(`\n📴 Received ${signal}. Graceful shutdown initiated...`);
+    
+    server.close(() => {
+      console.log('📴 HTTP server closed');
+      
+      mongoose.connection.close(false, () => {
+        console.log('📴 MongoDB connection closed');
+        console.log('📴 Graceful shutdown completed');
+        process.exit(0);
+      });
+    });
+
+    // Force close server after 30 seconds
+    setTimeout(() => {
+      console.error('📴 Could not close connections in time, forcefully shutting down');
+      process.exit(1);
+    }, 30000);
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+} catch (error) {
+  console.error('❌ Failed to start server:', error);
+  process.exit(1);
+}
+
+// Export app for testing
+module.exports = app;
