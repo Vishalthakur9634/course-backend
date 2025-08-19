@@ -9,7 +9,7 @@ const fsp = require('fs').promises;
 const router = express.Router();
 
 // Import Video model (adjust path as needed)
-const Video = require('../models/Video');
+const Video = require('./models/Video');
 
 // Ensure uploads directory exists
 const uploadDir = path.join(__dirname, '../uploads');
