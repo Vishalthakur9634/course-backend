@@ -5,66 +5,136 @@ const morgan = require('morgan');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const path = require('path');
+const fs = require('fs');
 
 // Load environment variables first
 dotenv.config({ path: './config/config.env' });
 
 const app = express();
 
+// Server state tracking
+let isServerReady = false;
+let isShuttingDown = false;
+
 // Enhanced error handling for uncaught exceptions
 process.on('uncaughtException', (err) => {
-  console.error('💥 UNCAUGHT EXCEPTION! Shutting down...');
+  console.error('💥 UNCAUGHT EXCEPTION! Details:');
   console.error('Error name:', err.name);
   console.error('Error message:', err.message);
   console.error('Stack trace:', err.stack);
-  process.exit(1);
-});
-
-// Enhanced error handling for unhandled promise rejections
-process.on('unhandledRejection', (err) => {
-  console.error('💥 UNHANDLED REJECTION! Shutting down...');
-  console.error('Error name:', err.name);
-  console.error('Error message:', err.message);
-  if (err.stack) console.error('Stack trace:', err.stack);
   
-  if (server) {
+  // Attempt graceful shutdown
+  if (server && !isShuttingDown) {
+    isShuttingDown = true;
+    console.log('🔄 Attempting graceful shutdown...');
     server.close(() => {
       process.exit(1);
     });
+    
+    // Force exit after 5 seconds
+    setTimeout(() => {
+      console.error('⚠️ Force exit after timeout');
+      process.exit(1);
+    }, 5000);
   } else {
     process.exit(1);
   }
 });
 
-// Database connection with retry logic
+// Enhanced error handling for unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 UNHANDLED REJECTION at:', promise, 'reason:', reason);
+  
+  // Don't exit immediately, log and continue
+  if (reason && reason.name === 'MongoNetworkError') {
+    console.log('🔄 MongoDB network error detected, will retry connection...');
+    return;
+  }
+  
+  if (!isShuttingDown) {
+    isShuttingDown = true;
+    console.log('🔄 Attempting graceful shutdown due to unhandled rejection...');
+    
+    if (server) {
+      server.close(() => {
+        process.exit(1);
+      });
+    } else {
+      process.exit(1);
+    }
+  }
+});
+
+// Robust database connection with exponential backoff
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+
 const connectDB = async () => {
   try {
     console.log('🔄 Attempting to connect to MongoDB...');
-    console.log('MongoDB URI:', process.env.MONGO_URI ? 'Set (hidden for security)' : 'NOT SET');
     
     if (!process.env.MONGO_URI) {
       throw new Error('MONGO_URI environment variable is not set');
     }
 
-    const conn = await mongoose.connect(process.env.MONGO_URI, {
+    // Enhanced connection options
+    const connectionOptions = {
       useNewUrlParser: true,
       useUnifiedTopology: true,
-      serverSelectionTimeoutMS: 10000, // 10 seconds
+      serverSelectionTimeoutMS: 15000, // 15 seconds
       socketTimeoutMS: 45000, // 45 seconds
-      family: 4 // Use IPv4, skip trying IPv6
-    });
+      connectTimeoutMS: 10000, // 10 seconds
+      family: 4, // Use IPv4
+      maxPoolSize: 10, // Maintain up to 10 socket connections
+      serverSelectionRetryDelayMS: 2000, // Wait 2 seconds before retrying
+      heartbeatFrequencyMS: 10000, // Send heartbeat every 10 seconds
+      retryWrites: true,
+      retryReads: true,
+      bufferMaxEntries: 0, // Disable mongoose buffering
+      bufferCommands: false, // Disable mongoose buffering
+    };
+    
+    const conn = await mongoose.connect(process.env.MONGO_URI, connectionOptions);
     
     console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
     console.log(`📊 Database Name: ${conn.connection.name}`);
     
+    // Reset reconnect attempts on successful connection
+    reconnectAttempts = 0;
+    
+    // Set up connection event listeners
+    mongoose.connection.on('error', (err) => {
+      console.error('❌ MongoDB connection error:', err);
+    });
+    
+    mongoose.connection.on('disconnected', () => {
+      console.log('⚠️ MongoDB disconnected');
+      if (!isShuttingDown) {
+        setTimeout(connectDB, 5000);
+      }
+    });
+    
+    mongoose.connection.on('reconnected', () => {
+      console.log('✅ MongoDB reconnected');
+    });
+    
     return conn;
+    
   } catch (err) {
     console.error('❌ Database connection error:', err.message);
-    console.error('Full error:', err);
     
-    // Retry connection after 5 seconds
-    console.log('🔄 Retrying database connection in 5 seconds...');
-    setTimeout(connectDB, 5000);
+    reconnectAttempts++;
+    
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      console.error('💥 Max reconnection attempts reached. Exiting...');
+      process.exit(1);
+    }
+    
+    // Exponential backoff: 2^attempt * 1000ms, max 30 seconds
+    const delay = Math.min(Math.pow(2, reconnectAttempts) * 1000, 30000);
+    console.log(`🔄 Retrying database connection in ${delay/1000} seconds... (Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+    
+    setTimeout(connectDB, delay);
   }
 };
 
@@ -73,10 +143,13 @@ connectDB();
 
 // Ensure uploads directory exists
 const uploadDir = path.join(__dirname, 'uploads');
-const fs = require('fs');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-  console.log('📁 Created uploads directory:', uploadDir);
+try {
+  if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+    console.log('📁 Created uploads directory:', uploadDir);
+  }
+} catch (error) {
+  console.error('❌ Error creating uploads directory:', error);
 }
 
 // Configure allowed origins
@@ -104,7 +177,13 @@ const corsOptions = {
       callback(null, true);
     } else {
       console.log('❌ CORS blocked origin:', origin);
-      callback(new Error(`CORS blocked: ${origin}`));
+      // Don't block in development, just warn
+      if (process.env.NODE_ENV === 'development') {
+        console.log('⚠️ Development mode: allowing blocked origin');
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS blocked: ${origin}`));
+      }
     }
   },
   credentials: true,
@@ -142,11 +221,46 @@ const corsOptions = {
   maxAge: 86400
 };
 
-// Apply CORS middleware
-app.use(cors(corsOptions));
+// Apply CORS middleware with error handling
+app.use((req, res, next) => {
+  cors(corsOptions)(req, res, (err) => {
+    if (err) {
+      console.error('CORS Error:', err.message);
+      return res.status(403).json({
+        success: false,
+        error: 'CORS policy violation',
+        origin: req.headers.origin
+      });
+    }
+    next();
+  });
+});
 
-// Additional CORS middleware for video routes
-app.use('/api/videos', cors(corsOptions));
+// Server readiness check middleware
+app.use((req, res, next) => {
+  if (isShuttingDown) {
+    return res.status(503).json({
+      success: false,
+      error: 'Server is shutting down',
+      message: 'Please try again in a moment'
+    });
+  }
+  next();
+});
+
+// Request timeout middleware
+app.use((req, res, next) => {
+  req.setTimeout(30000, () => {
+    console.log('⏰ Request timeout:', req.url);
+    if (!res.headersSent) {
+      res.status(408).json({
+        success: false,
+        error: 'Request timeout'
+      });
+    }
+  });
+  next();
+});
 
 // Logging middleware
 if (process.env.NODE_ENV === 'development') {
@@ -155,83 +269,158 @@ if (process.env.NODE_ENV === 'development') {
   app.use(morgan('combined'));
 }
 
-// Request logging middleware
+// Request logging middleware with error handling
 app.use((req, res, next) => {
-  console.log(`📥 ${new Date().toISOString()} - ${req.method} ${req.url}`);
+  try {
+    console.log(`📥 ${new Date().toISOString()} - ${req.method} ${req.url}`);
+  } catch (error) {
+    console.error('Logging error:', error);
+  }
   next();
 });
 
-// Body parsing middleware
-app.use(cookieParser());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Serve uploaded files
-app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
-  setHeaders: (res, path) => {
-    if (path.endsWith('.m3u8')) {
-      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-      res.setHeader('Cache-Control', 'no-cache');
-    } else if (path.endsWith('.ts')) {
-      res.setHeader('Content-Type', 'video/mp2t');
-      res.setHeader('Accept-Ranges', 'bytes');
+// Body parsing middleware with error handling
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf, encoding) => {
+    try {
+      JSON.parse(buf);
+    } catch (e) {
+      console.error('JSON Parse Error:', e.message);
+      throw new Error('Invalid JSON');
     }
   }
 }));
 
-// Health check endpoint
+app.use(express.urlencoded({ 
+  extended: true, 
+  limit: '10mb' 
+}));
+
+app.use(cookieParser());
+
+// Serve uploaded files with proper error handling
+app.use('/uploads', (req, res, next) => {
+  express.static(path.join(__dirname, 'uploads'), {
+    setHeaders: (res, filePath) => {
+      try {
+        if (filePath.endsWith('.m3u8')) {
+          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+          res.setHeader('Cache-Control', 'no-cache');
+        } else if (filePath.endsWith('.ts')) {
+          res.setHeader('Content-Type', 'video/mp2t');
+          res.setHeader('Accept-Ranges', 'bytes');
+        }
+      } catch (error) {
+        console.error('Error setting headers:', error);
+      }
+    },
+    fallthrough: false // Don't fall through to next middleware on file not found
+  })(req, res, (err) => {
+    if (err) {
+      console.error('Static file serving error:', err);
+      res.status(404).json({
+        success: false,
+        error: 'File not found'
+      });
+    } else {
+      next();
+    }
+  });
+});
+
+// Health check endpoints with comprehensive status
 app.get('/', (req, res) => {
   res.json({
     success: true,
     message: 'Course Backend API is running',
+    status: 'healthy',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
-    nodeVersion: process.version
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Server is healthy',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
+    nodeVersion: process.version,
+    serverReady: isServerReady,
     database: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
   });
 });
 
-// API health check
+app.get('/health', (req, res) => {
+  const dbStatus = mongoose.connection.readyState;
+  const isHealthy = dbStatus === 1 && !isShuttingDown;
+  
+  res.status(isHealthy ? 200 : 503).json({
+    success: isHealthy,
+    message: isHealthy ? 'Server is healthy' : 'Server is not ready',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    database: {
+      status: dbStatus === 1 ? 'Connected' : 'Disconnected',
+      readyState: dbStatus
+    },
+    server: {
+      ready: isServerReady,
+      shuttingDown: isShuttingDown
+    }
+  });
+});
+
+// API health check with CORS information
 app.get('/api/health', (req, res) => {
-  res.json({
-    success: true,
-    message: 'API is healthy',
+  const dbStatus = mongoose.connection.readyState;
+  const isHealthy = dbStatus === 1 && !isShuttingDown;
+  
+  res.status(isHealthy ? 200 : 503).json({
+    success: isHealthy,
+    message: isHealthy ? 'API is healthy' : 'API is not ready',
     cors: {
       allowedOrigins: allowedOrigins,
-      yourOrigin: req.headers.origin,
-      isAllowed: allowedOrigins.includes(req.headers.origin)
+      yourOrigin: req.headers.origin || 'none',
+      isAllowed: !req.headers.origin || allowedOrigins.includes(req.headers.origin)
     },
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// Import routes with error handling
+// Readiness probe (for load balancers)
+app.get('/ready', (req, res) => {
+  if (mongoose.connection.readyState === 1 && isServerReady && !isShuttingDown) {
+    res.status(200).json({ ready: true });
+  } else {
+    res.status(503).json({ ready: false });
+  }
+});
+
+// Liveness probe (for load balancers)
+app.get('/alive', (req, res) => {
+  if (!isShuttingDown) {
+    res.status(200).json({ alive: true });
+  } else {
+    res.status(503).json({ alive: false });
+  }
+});
+
+// Import routes with enhanced error handling
 let authRoutes, videoRoutes;
+
+const createFallbackRouter = (routeName) => {
+  const router = express.Router();
+  router.all('*', (req, res) => {
+    res.status(503).json({
+      success: false,
+      error: `${routeName} routes not available`,
+      message: 'Service temporarily unavailable'
+    });
+  });
+  return router;
+};
 
 try {
   authRoutes = require('./routes/auth');
   console.log('✅ Auth routes loaded successfully');
 } catch (error) {
   console.error('❌ Error loading auth routes:', error.message);
-  // Create a dummy router to prevent crashes
-  authRoutes = express.Router();
-  authRoutes.all('*', (req, res) => {
-    res.status(500).json({
-      success: false,
-      error: 'Auth routes not available'
-    });
-  });
+  authRoutes = createFallbackRouter('Auth');
 }
 
 try {
@@ -239,27 +428,56 @@ try {
   console.log('✅ Video routes loaded successfully');
 } catch (error) {
   console.error('❌ Error loading video routes:', error.message);
-  // Create a dummy router to prevent crashes
-  videoRoutes = express.Router();
-  videoRoutes.all('*', (req, res) => {
-    res.status(500).json({
-      success: false,
-      error: 'Video routes not available'
-    });
-  });
+  videoRoutes = createFallbackRouter('Video');
 }
 
-// Apply routes
-app.use('/api/auth', authRoutes);
-app.use('/api/videos', videoRoutes);
+// Apply routes with error handling
+app.use('/api/auth', (req, res, next) => {
+  try {
+    authRoutes(req, res, next);
+  } catch (error) {
+    console.error('Auth route error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Auth service error'
+    });
+  }
+});
 
-// Test route
+app.use('/api/videos', (req, res, next) => {
+  try {
+    videoRoutes(req, res, next);
+  } catch (error) {
+    console.error('Video route error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Video service error'
+    });
+  }
+});
+
+// Test route with comprehensive information
 app.get('/api/test', (req, res) => {
   res.json({
     success: true,
     message: 'API test endpoint working',
     timestamp: new Date().toISOString(),
-    headers: req.headers
+    server: {
+      ready: isServerReady,
+      uptime: process.uptime(),
+      memory: process.memoryUsage(),
+      nodeVersion: process.version
+    },
+    database: {
+      status: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected',
+      readyState: mongoose.connection.readyState
+    },
+    request: {
+      method: req.method,
+      url: req.url,
+      headers: req.headers,
+      ip: req.ip
+    }
   });
 });
 
@@ -272,34 +490,65 @@ app.use('/api/*', (req, res) => {
     availableEndpoints: [
       'GET /',
       'GET /health',
+      'GET /ready',
+      'GET /alive',
       'GET /api/health',
       'GET /api/test',
-      'POST /api/auth/*',
-      'POST /api/videos/*'
+      'ALL /api/auth/*',
+      'ALL /api/videos/*'
     ]
   });
 });
 
-// Global error handler
+// Global error handler with enhanced logging
 app.use((err, req, res, next) => {
   console.error('🔥 Global error handler triggered:');
   console.error('Error name:', err.name);
   console.error('Error message:', err.message);
   console.error('Request URL:', req.url);
   console.error('Request method:', req.method);
+  console.error('Request headers:', req.headers);
+  console.error('Stack trace:', err.stack);
   
-  // Don't send stack trace in production
+  // Handle specific error types
+  let statusCode = err.statusCode || 500;
+  let errorMessage = err.message || 'Internal Server Error';
+  
+  if (err.name === 'ValidationError') {
+    statusCode = 400;
+    errorMessage = 'Validation Error';
+  } else if (err.name === 'CastError') {
+    statusCode = 400;
+    errorMessage = 'Invalid ID format';
+  } else if (err.code === 11000) {
+    statusCode = 400;
+    errorMessage = 'Duplicate field value';
+  } else if (err.name === 'JsonWebTokenError') {
+    statusCode = 401;
+    errorMessage = 'Invalid token';
+  } else if (err.name === 'TokenExpiredError') {
+    statusCode = 401;
+    errorMessage = 'Token expired';
+  }
+  
   const errorResponse = {
     success: false,
-    error: err.message || 'Internal Server Error',
+    error: errorMessage,
     timestamp: new Date().toISOString()
   };
 
   if (process.env.NODE_ENV === 'development') {
     errorResponse.stack = err.stack;
+    errorResponse.details = {
+      name: err.name,
+      code: err.code
+    };
   }
 
-  res.status(err.statusCode || 500).json(errorResponse);
+  // Don't send response if headers already sent
+  if (!res.headersSent) {
+    res.status(statusCode).json(errorResponse);
+  }
 });
 
 // Handle all other routes
@@ -314,59 +563,110 @@ app.use('*', (req, res) => {
 // Port configuration
 const PORT = process.env.PORT || 3000;
 
-// Start server with error handling
+// Start server with enhanced error handling and health checks
 let server;
-try {
-  server = app.listen(PORT, '0.0.0.0', () => {
-    console.log('\n🚀 ================================');
-    console.log('🚀 SERVER STARTED SUCCESSFULLY');
-    console.log('🚀 ================================');
-    console.log(`📍 Port: ${PORT}`);
-    console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🕐 Started at: ${new Date().toISOString()}`);
-    console.log(`📁 Uploads directory: ${uploadDir}`);
-    console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-    console.log('🚀 ================================\n');
-  });
 
-  server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.error(`❌ Port ${PORT} is already in use`);
-      process.exit(1);
-    } else {
+const startServer = () => {
+  try {
+    server = app.listen(PORT, '0.0.0.0', () => {
+      isServerReady = true;
+      console.log('\n🚀 ================================');
+      console.log('🚀 SERVER STARTED SUCCESSFULLY');
+      console.log('🚀 ================================');
+      console.log(`📍 Port: ${PORT}`);
+      console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`🕐 Started at: ${new Date().toISOString()}`);
+      console.log(`📁 Uploads directory: ${uploadDir}`);
+      console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+      console.log(`🔗 Ready check: http://localhost:${PORT}/ready`);
+      console.log(`🔗 API test: http://localhost:${PORT}/api/test`);
+      console.log('🚀 ================================\n');
+    });
+
+    // Configure server timeouts
+    server.timeout = 30000; // 30 seconds
+    server.keepAliveTimeout = 65000; // 65 seconds
+    server.headersTimeout = 66000; // 66 seconds
+
+    server.on('error', (err) => {
       console.error('❌ Server error:', err);
-      process.exit(1);
-    }
-  });
-
-  // Graceful shutdown handling
-  const gracefulShutdown = (signal) => {
-    console.log(`\n📴 Received ${signal}. Graceful shutdown initiated...`);
-    
-    server.close(() => {
-      console.log('📴 HTTP server closed');
       
-      mongoose.connection.close(false, () => {
-        console.log('📴 MongoDB connection closed');
+      if (err.code === 'EADDRINUSE') {
+        console.error(`❌ Port ${PORT} is already in use`);
+        console.log('🔄 Trying to start on next available port...');
+        
+        // Try next port
+        const newPort = parseInt(PORT) + 1;
+        process.env.PORT = newPort.toString();
+        setTimeout(startServer, 1000);
+      } else {
+        console.error('❌ Server startup failed:', err);
+        process.exit(1);
+      }
+    });
+
+    server.on('clientError', (err, socket) => {
+      console.error('Client error:', err);
+      if (!socket.destroyed) {
+        socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+      }
+    });
+
+    server.on('connection', (socket) => {
+      socket.on('error', (err) => {
+        console.error('Socket error:', err);
+      });
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    setTimeout(startServer, 2000); // Retry after 2 seconds
+  }
+};
+
+// Graceful shutdown handling
+const gracefulShutdown = (signal) => {
+  console.log(`\n📴 Received ${signal}. Graceful shutdown initiated...`);
+  isShuttingDown = true;
+  
+  if (server) {
+    // Stop accepting new requests
+    server.close((err) => {
+      if (err) {
+        console.error('Error closing server:', err);
+      } else {
+        console.log('📴 HTTP server closed');
+      }
+      
+      // Close database connection
+      mongoose.connection.close(false, (err) => {
+        if (err) {
+          console.error('Error closing database:', err);
+        } else {
+          console.log('📴 MongoDB connection closed');
+        }
+        
         console.log('📴 Graceful shutdown completed');
         process.exit(0);
       });
     });
 
-    // Force close server after 30 seconds
+    // Force close server after 10 seconds
     setTimeout(() => {
       console.error('📴 Could not close connections in time, forcefully shutting down');
       process.exit(1);
-    }, 30000);
-  };
+    }, 10000);
+  } else {
+    process.exit(0);
+  }
+};
 
-  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+// Register shutdown handlers
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-} catch (error) {
-  console.error('❌ Failed to start server:', error);
-  process.exit(1);
-}
+// Start the server
+startServer();
 
 // Export app for testing
 module.exports = app;
