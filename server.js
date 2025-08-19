@@ -77,21 +77,18 @@ const connectDB = async () => {
       throw new Error('MONGO_URI environment variable is not set');
     }
 
-    // Enhanced connection options
+    // Compatible connection options
     const connectionOptions = {
       useNewUrlParser: true,
       useUnifiedTopology: true,
       serverSelectionTimeoutMS: 15000, // 15 seconds
       socketTimeoutMS: 45000, // 45 seconds
       connectTimeoutMS: 10000, // 10 seconds
-      family: 4, // Use IPv4
       maxPoolSize: 10, // Maintain up to 10 socket connections
-      serverSelectionRetryDelayMS: 2000, // Wait 2 seconds before retrying
-      heartbeatFrequencyMS: 10000, // Send heartbeat every 10 seconds
       retryWrites: true,
       retryReads: true,
-      bufferMaxEntries: 0, // Disable mongoose buffering
       bufferCommands: false, // Disable mongoose buffering
+      bufferMaxEntries: 0 // Disable mongoose buffering
     };
     
     const conn = await mongoose.connect(process.env.MONGO_URI, connectionOptions);
