@@ -5,43 +5,95 @@ const morgan = require('morgan');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const path = require('path');
+const fs = require('fs');
 
 // Load environment variables
 dotenv.config({ path: './config/config.env' });
 
-// Import routes
-const authRoutes = require('./routes/auth');
-const videoRoutes = require('./routes/videoRoutes');
-
 const app = express();
 
-// Database connection
+// Server state tracking
+let isServerReady = false;
+let isShuttingDown = false;
+
+// Enhanced but simple error handling for uncaught exceptions
+process.on('uncaughtException', (err) => {
+  console.error('💥 UNCAUGHT EXCEPTION:', err.message);
+  console.error('Stack:', err.stack);
+  
+  if (!isShuttingDown) {
+    isShuttingDown = true;
+    process.exit(1);
+  }
+});
+
+// Database connection with retry logic (simplified from working version)
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+
 const connectDB = async () => {
   try {
+    console.log('🔄 Connecting to MongoDB...');
+    
+    if (!process.env.MONGO_URI) {
+      throw new Error('MONGO_URI environment variable is not set');
+    }
+    
+    // Use the same simple connection options that worked in the first version
     const conn = await mongoose.connect(process.env.MONGO_URI);
-    console.log(`MongoDB Connected: ${conn.connection.host}`);
+    
+    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+    console.log(`📊 Database: ${conn.connection.name || 'default'}`);
+    
+    // Reset reconnect attempts on success
+    reconnectAttempts = 0;
+    
+    // Simple event listeners (only set once)
+    if (!mongoose.connection.listeners('error').length) {
+      mongoose.connection.on('error', (err) => {
+        console.error('❌ MongoDB error:', err.message);
+      });
+      
+      mongoose.connection.on('disconnected', () => {
+        console.log('⚠️ MongoDB disconnected');
+        if (!isShuttingDown && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          reconnectAttempts++;
+          setTimeout(connectDB, 5000);
+        }
+      });
+    }
+    
   } catch (err) {
-    console.error('Database connection error:', err.message);
-    process.exit(1);
+    console.error('❌ Database connection failed:', err.message);
+    
+    if (err.name === 'MongooseServerSelectionError') {
+      console.error('🔍 Check: MongoDB Atlas cluster status, IP whitelist, credentials');
+    }
+    
+    reconnectAttempts++;
+    
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      console.error('💥 Max reconnection attempts reached. Exiting...');
+      process.exit(1);
+    }
+    
+    const delay = Math.min(reconnectAttempts * 2000, 10000);
+    console.log(`🔄 Retrying in ${delay/1000}s... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+    setTimeout(connectDB, delay);
   }
 };
 
 // Connect to database
 connectDB();
 
-// COMPREHENSIVE REQUEST LOGGING
-app.use((req, res, next) => {
-  console.log('\n=== INCOMING REQUEST ===');
-  console.log(`${req.method} ${req.url}`);
-  console.log('Origin:', req.headers.origin);
-  console.log('User-Agent:', req.headers['user-agent']);
-  console.log('Content-Type:', req.headers['content-type']);
-  console.log('All headers:', JSON.stringify(req.headers, null, 2));
-  console.log('========================\n');
-  next();
-});
+// Ensure uploads directory exists
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+  console.log('📁 Created uploads directory');
+}
 
-// Configure allowed origins
+// Configure allowed origins (from working version)
 const allowedOrigins = [
   'https://course-fronten.netlify.app',
   'https://course-fronte.netlify.app',
@@ -52,15 +104,21 @@ const allowedOrigins = [
   process.env.FRONTEND_URL
 ].filter(Boolean);
 
-console.log('🔧 Server starting with allowed origins:', allowedOrigins);
+console.log('🔧 Allowed origins:', allowedOrigins);
 
-// Enhanced CORS configuration for different endpoints
-const generalCorsOptions = {
+// COMPREHENSIVE REQUEST LOGGING (from working version)
+app.use((req, res, next) => {
+  console.log('\n=== INCOMING REQUEST ===');
+  console.log(`${req.method} ${req.url}`);
+  console.log('Origin:', req.headers.origin);
+  console.log('Content-Type:', req.headers['content-type']);
+  console.log('========================\n');
+  next();
+});
+
+// Enhanced CORS configuration (from working version with improvements)
+const corsOptions = {
   origin: function (origin, callback) {
-    console.log('\n🔍 GENERAL CORS CHECK:');
-    console.log('Request origin:', origin);
-    console.log('Allowed origins:', allowedOrigins);
-    
     // Allow requests with no origin (mobile apps, Postman, etc.)
     if (!origin) {
       console.log('✅ No origin - ALLOWED');
@@ -73,8 +131,13 @@ const generalCorsOptions = {
       callback(null, true);
     } else {
       console.log('❌ Origin BLOCKED:', origin);
-      console.log('Available origins:', allowedOrigins);
-      callback(new Error(`CORS blocked: ${origin}`));
+      // In development, allow all origins but warn
+      if (process.env.NODE_ENV === 'development') {
+        console.log('⚠️ Development mode: allowing blocked origin');
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS blocked: ${origin}`));
+      }
     }
   },
   credentials: true,
@@ -110,30 +173,22 @@ const generalCorsOptions = {
   maxAge: 86400 // 24 hours preflight cache
 };
 
-// Apply general CORS middleware first
-app.use(cors(generalCorsOptions));
+// Apply CORS middleware
+app.use(cors(corsOptions));
 
-// VIDEO-SPECIFIC CORS MIDDLEWARE (for streaming and video endpoints)
+// VIDEO-SPECIFIC CORS MIDDLEWARE (from working version)
 app.use('/api/videos', cors({
   origin: function (origin, callback) {
-    console.log('\n🎥 VIDEO CORS CHECK:');
-    console.log('Request origin:', origin);
-    console.log('Allowed origins:', allowedOrigins);
+    if (!origin) return callback(null, true);
     
-    // Allow requests with no origin (mobile apps, Postman, etc.)
-    if (!origin) {
-      console.log('✅ No origin - ALLOWED');
-      return callback(null, true);
-    }
-    
-    // Check if origin is in allowed list
     if (allowedOrigins.includes(origin)) {
-      console.log('✅ Origin ALLOWED:', origin);
       callback(null, true);
     } else {
-      console.log('❌ Origin BLOCKED:', origin);
-      console.log('Available origins:', allowedOrigins);
-      callback(new Error(`CORS blocked: ${origin}`));
+      if (process.env.NODE_ENV === 'development') {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS blocked: ${origin}`));
+      }
     }
   },
   credentials: true,
@@ -146,15 +201,15 @@ app.use('/api/videos', cors({
     'Accept-Language',
     'Content-Language',
     'Origin',
-    'Cache-Control', // Added for video streaming
-    'Pragma',        // Added for caching
-    'Expires',       // Added for caching
-    'If-Modified-Since', // Added for conditional requests
-    'If-None-Match',     // Added for conditional requests
-    'If-Range',      // Added for range requests
-    'Range',         // Added for partial content requests (video seeking)
-    'Accept-Ranges', // Added for range requests
-    'Content-Range', // Added for partial content responses
+    'Cache-Control',
+    'Pragma',
+    'Expires',
+    'If-Modified-Since',
+    'If-None-Match',
+    'If-Range',
+    'Range',
+    'Accept-Ranges',
+    'Content-Range',
     'User-Agent'
   ],
   exposedHeaders: [
@@ -171,9 +226,8 @@ app.use('/api/videos', cors({
   maxAge: 86400
 }));
 
-// Custom middleware to handle CORS for video streaming endpoints specifically
+// Custom middleware for video streaming endpoints (from working version)
 app.use('/api/videos/stream', (req, res, next) => {
-  // Set CORS headers explicitly for video streaming
   const origin = req.headers.origin;
   
   if (allowedOrigins.includes(origin) || !origin) {
@@ -213,7 +267,6 @@ app.use('/api/videos/stream', (req, res, next) => {
   
   res.setHeader('Access-Control-Max-Age', '86400');
   
-  // Handle preflight requests
   if (req.method === 'OPTIONS') {
     console.log('🎥 Handling OPTIONS request for video streaming');
     return res.status(200).end();
@@ -222,29 +275,20 @@ app.use('/api/videos/stream', (req, res, next) => {
   next();
 });
 
-// RESPONSE LOGGING
-app.use((req, res, next) => {
-  const originalSend = res.send;
-  res.send = function(data) {
-    console.log('\n=== OUTGOING RESPONSE ===');
-    console.log(`Status: ${res.statusCode}`);
-    console.log('Headers:', JSON.stringify(res.getHeaders(), null, 2));
-    console.log('========================\n');
-    originalSend.call(this, data);
-  };
-  next();
-});
+// Basic logging middleware
+if (process.env.NODE_ENV !== 'production') {
+  app.use(morgan('dev'));
+}
 
 // Body parsing middleware
 app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// SERVE UPLOADED FILES WITH PROPER HEADERS FOR VIDEO STREAMING
+// SERVE UPLOADED FILES WITH PROPER HEADERS (from working version)
 app.use('/uploads', (req, res, next) => {
   console.log('📁 Serving file from uploads:', req.path);
   
-  // Set CORS headers for uploads
   const origin = req.headers.origin;
   if (allowedOrigins.includes(origin) || !origin) {
     res.setHeader('Access-Control-Allow-Origin', origin || '*');
@@ -266,7 +310,7 @@ app.use('/uploads', (req, res, next) => {
   next();
 }, express.static(path.join(__dirname, 'uploads')));
 
-// Handle all OPTIONS requests globally
+// Handle all OPTIONS requests globally (from working version)
 app.options('*', (req, res) => {
   console.log('🔧 Handling global OPTIONS request for:', req.path);
   
@@ -295,7 +339,44 @@ app.options('*', (req, res) => {
   res.status(200).end();
 });
 
-// MANUAL TEST ROUTE TO VERIFY CORS
+// Basic route for testing
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Course Backend API is running successfully',
+    status: 'healthy',
+    cors: 'Enhanced CORS configuration active',
+    uploads: 'Uploads directory available at /uploads',
+    timestamp: new Date().toISOString(),
+    database: mongoose.connection.readyState === 1 ? 'Connected' : 'Connecting...'
+  });
+});
+
+// Health check endpoint with comprehensive info
+app.get('/api/health', (req, res) => {
+  const dbStatus = mongoose.connection.readyState;
+  res.json({
+    success: true,
+    message: 'Server is healthy',
+    cors: {
+      allowedOrigins: allowedOrigins,
+      yourOrigin: req.headers.origin,
+      isAllowed: !req.headers.origin || allowedOrigins.includes(req.headers.origin)
+    },
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    database: {
+      status: dbStatus === 1 ? 'Connected' : 'Connecting',
+      readyState: dbStatus
+    },
+    uploads: {
+      directory: uploadDir,
+      accessible: fs.existsSync(uploadDir)
+    }
+  });
+});
+
+// MANUAL TEST ROUTES (from working version)
 app.all('/api/test', (req, res) => {
   console.log('🧪 Test route hit!');
   res.json({
@@ -310,7 +391,6 @@ app.all('/api/test', (req, res) => {
   });
 });
 
-// SIMPLE AUTH TEST ROUTE (to isolate the issue)
 app.post('/api/auth/test-register', (req, res) => {
   console.log('🧪 Auth test route hit!');
   res.json({
@@ -321,67 +401,103 @@ app.post('/api/auth/test-register', (req, res) => {
   });
 });
 
-// Routes
+// Debug route for troubleshooting
+app.get('/api/debug', (req, res) => {
+  res.json({
+    success: true,
+    server: {
+      ready: isServerReady,
+      uptime: process.uptime(),
+      nodeVersion: process.version,
+      environment: process.env.NODE_ENV || 'development'
+    },
+    database: {
+      status: mongoose.connection.readyState === 1 ? 'Connected' : 'Not Connected',
+      readyState: mongoose.connection.readyState,
+      name: mongoose.connection.name
+    },
+    uploads: {
+      directory: uploadDir,
+      exists: fs.existsSync(uploadDir)
+    },
+    request: {
+      method: req.method,
+      url: req.url,
+      origin: req.headers.origin,
+      userAgent: req.headers['user-agent']
+    }
+  });
+});
+
+// Import routes with fallback handling
+let authRoutes, videoRoutes;
+
+try {
+  authRoutes = require('./routes/auth');
+  console.log('✅ Auth routes loaded successfully');
+} catch (error) {
+  console.error('❌ Error loading auth routes:', error.message);
+  authRoutes = express.Router();
+  authRoutes.all('*', (req, res) => {
+    res.status(503).json({
+      success: false,
+      error: 'Auth service temporarily unavailable',
+      details: error.message
+    });
+  });
+}
+
+try {
+  videoRoutes = require('./routes/videoRoutes');
+  console.log('✅ Video routes loaded successfully');
+} catch (error) {
+  console.error('❌ Error loading video routes:', error.message);
+  videoRoutes = express.Router();
+  videoRoutes.all('*', (req, res) => {
+    res.status(503).json({
+      success: false,
+      error: 'Video service temporarily unavailable',
+      details: error.message
+    });
+  });
+}
+
+// Apply routes with logging
 app.use('/api/auth', (req, res, next) => {
   console.log('🔐 Auth route middleware hit:', req.method, req.url);
   next();
 }, authRoutes);
 
-app.use('/api/videos', videoRoutes);
+app.use('/api/videos', (req, res, next) => {
+  console.log('🎥 Video route middleware hit:', req.method, req.url);
+  next();
+}, videoRoutes);
 
-// Basic route for testing
-app.get('/', (req, res) => {
-  res.json({
-    success: true,
-    message: 'API is running successfully',
-    cors: 'Enhanced CORS configuration active',
-    uploads: 'Uploads directory available at /uploads'
-  });
-});
-
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Server is healthy',
-    cors: {
-      allowedOrigins: allowedOrigins,
-      yourOrigin: req.headers.origin,
-      isAllowed: allowedOrigins.includes(req.headers.origin)
-    },
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    uploads: {
-      directory: path.join(__dirname, 'uploads'),
-      accessible: true
-    }
-  });
-});
-
-// Catch-all for debugging missing routes
+// Catch-all for debugging missing API routes
 app.use('/api/*', (req, res) => {
   console.log('🚫 Unmatched API route:', req.method, req.url);
   res.status(404).json({
     success: false,
     error: `API endpoint not found: ${req.method} ${req.url}`,
     availableRoutes: [
+      'GET /',
       'GET /api/health',
+      'GET /api/debug',
       'ALL /api/test',
       'POST /api/auth/test-register',
-      'POST /api/auth/register (from authRoutes)',
+      'POST /api/auth/* (from authRoutes)',
+      'ALL /api/videos/* (from videoRoutes)',
       'GET /uploads/* (static files)'
     ]
   });
 });
 
-// Enhanced error handler with CORS support
+// Enhanced error handler with CORS support (simplified)
 app.use((err, req, res, next) => {
-  console.error('\n❌ ERROR HANDLER TRIGGERED:');
-  console.error('Error message:', err.message);
-  console.error('Error stack:', err.stack);
-  console.error('Request URL:', req.url);
-  console.error('Request method:', req.method);
-  console.error('Request origin:', req.headers.origin);
+  console.error('\n❌ ERROR HANDLER:');
+  console.error('Message:', err.message);
+  console.error('URL:', req.url);
+  console.error('Method:', req.method);
 
   // Ensure CORS headers are set even for errors
   const origin = req.headers.origin;
@@ -390,23 +506,30 @@ app.use((err, req, res, next) => {
   }
   res.setHeader('Access-Control-Allow-Credentials', 'true');
 
-  // Mongoose errors
+  // Handle specific error types
+  let statusCode = 500;
+  let message = 'Internal Server Error';
+
   if (err.name === 'CastError') {
-    const message = 'Resource not found';
-    err = { message, statusCode: 404 };
+    statusCode = 404;
+    message = 'Resource not found';
   } else if (err.code === 11000) {
-    const message = 'Duplicate field value entered';
-    err = { message, statusCode: 400 };
+    statusCode = 400;
+    message = 'Duplicate field value entered';
   } else if (err.name === 'ValidationError') {
-    const message = Object.values(err.errors).map(val => val.message);
-    err = { message, statusCode: 400 };
+    statusCode = 400;
+    message = Object.values(err.errors).map(val => val.message).join(', ');
+  } else if (err.message.includes('CORS')) {
+    statusCode = 403;
+    message = err.message;
   }
-  
-  res.status(err.statusCode || 500).json({
+
+  res.status(statusCode).json({
     success: false,
-    error: err.message || 'Internal Server Error',
+    error: message,
     url: req.url,
-    method: req.method
+    method: req.method,
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
   });
 });
 
@@ -414,7 +537,6 @@ app.use((err, req, res, next) => {
 app.all('*', (req, res) => {
   console.log(`🔍 404: ${req.method} ${req.url} from ${req.headers.origin}`);
   
-  // Ensure CORS headers for 404s
   const origin = req.headers.origin;
   if (allowedOrigins.includes(origin) || !origin) {
     res.setHeader('Access-Control-Allow-Origin', origin || '*');
@@ -427,46 +549,55 @@ app.all('*', (req, res) => {
   });
 });
 
+// Server configuration
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
-  console.log('\n🚀 SERVER STARTED');
-  console.log(`Port: ${PORT}`);
-  console.log('Allowed origins:', allowedOrigins);
-  console.log('Environment:', process.env.NODE_ENV || 'development');
-  console.log('Uploads directory:', path.join(__dirname, 'uploads'));
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  isServerReady = true;
+  console.log('\n🚀 ================================');
+  console.log('🚀 SERVER STARTED SUCCESSFULLY');
+  console.log('🚀 ================================');
+  console.log(`📍 Port: ${PORT}`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log('🔗 Allowed origins:', allowedOrigins);
+  console.log(`📁 Uploads directory: ${uploadDir}`);
   console.log('\n📋 Test these endpoints:');
-  console.log(`- GET  https://course-backends.onrender.com/api/health`);
-  console.log(`- POST https://course-backends.onrender.com/api/test`);
-  console.log(`- POST https://course-backends.onrender.com/api/auth/test-register`);
-  console.log(`- GET  https://course-backends.onrender.com/uploads/[filename]`);
+  console.log(`- GET  http://localhost:${PORT}/api/health`);
+  console.log(`- GET  http://localhost:${PORT}/api/test`);
+  console.log(`- POST http://localhost:${PORT}/api/auth/test-register`);
+  console.log(`- GET  http://localhost:${PORT}/api/debug`);
   console.log('========================\n');
 });
 
-// Handle unhandled promise rejections
+// Handle unhandled promise rejections (simplified)
 process.on('unhandledRejection', (err, promise) => {
-  console.log(`Error: ${err.message}`);
-  server.close(() => process.exit(1));
+  console.log(`❌ Unhandled Rejection: ${err.message}`);
+  if (!isShuttingDown) {
+    server.close(() => process.exit(1));
+  }
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
+const gracefulShutdown = (signal) => {
+  console.log(`\n📴 ${signal} received. Shutting down gracefully...`);
+  isShuttingDown = true;
+  
   server.close(() => {
+    console.log('📴 HTTP server closed');
     mongoose.connection.close(false, () => {
-      process.exit(0);
-    });
-  });
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
-  server.close(() => {
-    mongoose.connection.close(false, () => {
+      console.log('📴 MongoDB connection closed');
       process.exit(0);
     });
   });
   
-});
+  setTimeout(() => {
+    console.error('📴 Forced shutdown');
+    process.exit(1);
+  }, 10000);
+};
 
-// Export the Express app for deployment platforms
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Export the Express app
 module.exports = app;
