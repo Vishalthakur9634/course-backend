@@ -1,472 +1,408 @@
 const express = require('express');
-const cors = require('cors');
-const cookieParser = require('cookie-parser');
-const morgan = require('morgan');
+const multer = require('multer');
+const ffmpeg = require('fluent-ffmpeg');
 const mongoose = require('mongoose');
-const dotenv = require('dotenv');
 const path = require('path');
+const fs = require('fs');
+const fsp = require('fs').promises;
 
-// Load environment variables
-dotenv.config({ path: './config/config.env' });
+const router = express.Router();
 
-// Import routes
-const authRoutes = require('./routes/auth');
-const videoRoutes = require('./routes/videoRoutes');
+// Import Video model (adjust path as needed)
+const Video = require('../models/Video');
 
-const app = express();
+// Ensure uploads directory exists
+const uploadDir = path.join(__dirname, '../uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+  console.log('📁 Created uploads directory:', uploadDir);
+}
 
-// Database connection
-const connectDB = async () => {
+// Multer configuration for file uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 500 * 1024 * 1024 // 500MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedMimes = ['video/mp4', 'video/avi', 'video/mov', 'video/wmv', 'video/flv', 'video/quicktime'];
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only video files are allowed.'));
+    }
+  }
+}).single('video');
+
+// Simplified renditions for faster processing and stability
+const renditions = [
+  {
+    resolution: '1280x720',
+    bandwidth: '2500k',
+    audioBitrate: '128k',
+    folderName: '720p',
+    playlistName: 'index.m3u8'
+  },
+  {
+    resolution: '854x480',
+    bandwidth: '1200k',
+    audioBitrate: '96k',
+    folderName: '480p',
+    playlistName: 'index.m3u8'
+  }
+];
+
+// Function to get video duration with timeout
+const getVideoDuration = (filePath) => {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      console.warn('Duration detection timeout, defaulting to 0');
+      resolve(0);
+    }, 20000); // 20 seconds timeout
+
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      clearTimeout(timeout);
+      if (err) {
+        console.error('FFprobe error:', err);
+        resolve(0); // Default to 0 if cannot get duration
+      } else {
+        const duration = metadata?.format?.duration || 0;
+        resolve(Math.round(duration));
+      }
+    });
+  });
+};
+
+// Test route to verify the router is working
+router.get('/test', (req, res) => {
+  console.log('🧪 Video test route hit!');
+  res.json({
+    success: true,
+    message: 'Video routes are working',
+    uploadDir: uploadDir,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Main upload route - KEEPS THE SAME RESPONSE FORMAT AS YOUR ORIGINAL
+router.post('/upload', (req, res) => {
+  console.log('🚀 Upload route hit!');
+  
+  // Increase timeout for this specific route
+  req.setTimeout(300000); // 5 minutes
+  res.setTimeout(300000); // 5 minutes
+
+  upload(req, res, async (err) => {
+    let inputFilePath = req.file?.path;
+    let outputDir;
+
+    try {
+      // Handle upload errors
+      if (err instanceof multer.MulterError) {
+        console.error('Multer error:', err);
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          throw new Error('File size too large. Maximum size is 500MB.');
+        }
+        throw new Error(`Upload error: ${err.message}`);
+      } else if (err) {
+        console.error('Upload error:', err);
+        throw err;
+      }
+      
+      if (!req.file) {
+        throw new Error("No file uploaded");
+      }
+
+      console.log('📤 File uploaded:', req.file.originalname);
+      console.log('📁 Temporary path:', inputFilePath);
+
+      const videoId = new mongoose.Types.ObjectId();
+      outputDir = path.join(uploadDir, videoId.toString());
+
+      console.log('🎬 Processing video with ID:', videoId);
+      console.log('📂 Output directory:', outputDir);
+
+      // Create output directory
+      await fsp.mkdir(outputDir, { recursive: true });
+
+      // Get video duration first
+      let duration = 0;
+      try {
+        duration = await getVideoDuration(inputFilePath);
+        console.log('⏱️ Video duration:', duration, 'seconds');
+      } catch (durationError) {
+        console.warn('⚠️ Could not get video duration:', durationError.message);
+      }
+
+      // Process renditions with optimized settings for stability
+      const processingPromises = renditions.map((rendition, index) => {
+        const renditionDir = path.join(outputDir, rendition.folderName);
+        
+        return new Promise((resolve, reject) => {
+          // Add delay between processing to prevent resource conflicts
+          setTimeout(() => {
+            fsp.mkdir(renditionDir, { recursive: true })
+              .then(() => {
+                console.log(`🔄 Starting ${rendition.resolution} processing...`);
+                
+                const command = ffmpeg(inputFilePath)
+                  .outputOptions([
+                    '-c:v libx264',
+                    '-c:a aac',
+                    '-profile:v baseline',
+                    '-level 3.0',
+                    '-pix_fmt yuv420p',
+                    '-crf 23',
+                    '-preset ultrafast', // Fastest preset for stability
+                    '-threads 1', // Single thread to prevent overload
+                    `-b:v ${rendition.bandwidth}`,
+                    `-b:a ${rendition.audioBitrate}`,
+                    `-vf scale=${rendition.resolution}:force_original_aspect_ratio=decrease,pad=${rendition.resolution}:(ow-iw)/2:(oh-ih)/2`,
+                    '-hls_time 6', // Longer segments for stability
+                    '-hls_list_size 0',
+                    '-hls_flags independent_segments',
+                    `-hls_segment_filename ${path.join(renditionDir, 'segment_%03d.ts')}`,
+                    '-f hls'
+                  ])
+                  .output(path.join(renditionDir, rendition.playlistName))
+                  .on('start', (commandLine) => {
+                    console.log(`🎯 Started processing ${rendition.resolution}`);
+                  })
+                  .on('progress', (progress) => {
+                    if (progress.percent && progress.percent > 0) {
+                      const percent = Math.floor(progress.percent);
+                      if (percent % 25 === 0) { // Log every 25%
+                        console.log(`⏳ Processing ${rendition.resolution}: ${percent}% done`);
+                      }
+                    }
+                  })
+                  .on('end', () => {
+                    console.log(`✅ Finished processing ${rendition.resolution}`);
+                    resolve();
+                  })
+                  .on('error', (err) => {
+                    console.error(`❌ Error processing ${rendition.resolution}:`, err.message);
+                    reject(err);
+                  });
+
+                command.run();
+              })
+              .catch(reject);
+          }, index * 2000); // 2 second delay between each rendition
+        });
+      });
+
+      try {
+        await Promise.all(processingPromises);
+        console.log('🎉 All renditions processed successfully');
+      } catch (processingError) {
+        console.error('Processing error:', processingError);
+        // Continue with single rendition if multiple fail
+        throw new Error('Video processing failed. Please try with a smaller file or different format.');
+      }
+
+      // Create master playlist
+      const masterContent = [
+        '#EXTM3U',
+        '#EXT-X-VERSION:6',
+        ...renditions.map(r => [
+          `#EXT-X-STREAM-INF:BANDWIDTH=${parseInt(r.bandwidth)*1000},RESOLUTION=${r.resolution},CODECS="avc1.64001f,mp4a.40.2"`,
+          `${r.folderName}/${r.playlistName}`
+        ].join('\n'))
+      ].join('\n');
+
+      const masterPath = path.join(outputDir, 'master.m3u8');
+      await fsp.writeFile(masterPath, masterContent);
+      console.log('📝 Master playlist created');
+
+      // Save to database
+      const video = new Video({
+        _id: videoId,
+        title: req.body.title || path.parse(req.file.originalname).name,
+        description: req.body.description || '',
+        originalFileName: req.file.originalname,
+        filePath: `${videoId}/master.m3u8`,
+        fileSize: req.file.size,
+        mimeType: req.file.mimetype,
+        duration: duration,
+        renditions: renditions.map(r => ({
+          resolution: r.resolution,
+          bandwidth: parseInt(r.bandwidth) * 1000,
+          playlistPath: `${videoId}/${r.folderName}/${r.playlistName}`
+        }))
+      });
+
+      await video.save();
+      console.log('💾 Video saved to database');
+
+      // Cleanup original file
+      if (inputFilePath) {
+        try {
+          await fsp.unlink(inputFilePath);
+          console.log('🗑️ Original file cleaned up');
+        } catch (cleanupErr) {
+          console.error('⚠️ Original file cleanup error:', cleanupErr);
+        }
+      }
+
+      // RETURN THE SAME FORMAT YOUR FRONTEND EXPECTS
+      res.status(201).json({
+        success: true,
+        message: "Video processed successfully",
+        video: {
+          ...video.toObject(),
+          hlsPlaylist: `/api/videos/stream/${video._id}/master.m3u8`
+        }
+      });
+
+    } catch (error) {
+      console.error('❌ Upload error:', error);
+      
+      // Comprehensive cleanup on error
+      const cleanup = async () => {
+        if (inputFilePath && fs.existsSync(inputFilePath)) {
+          try {
+            await fsp.unlink(inputFilePath);
+            console.log('🗑️ Input file cleaned up after error');
+          } catch (err) {
+            console.error('⚠️ Error deleting input file:', err);
+          }
+        }
+        
+        if (outputDir && fs.existsSync(outputDir)) {
+          try {
+            await fsp.rm(outputDir, { recursive: true, force: true });
+            console.log('🗑️ Output directory cleaned up after error');
+          } catch (err) {
+            console.error('⚠️ Error deleting output directory:', err);
+          }
+        }
+      };
+
+      await cleanup();
+
+      // Return error in the same format your frontend expects
+      if (!res.headersSent) {
+        res.status(500).json({ 
+          success: false,
+          error: error.message,
+          ...(process.env.NODE_ENV === 'development' && { stack: error.stack })
+        });
+      }
+    }
+  });
+});
+
+// Route to get all videos - SAME FORMAT AS ORIGINAL
+router.get('/', async (req, res) => {
   try {
-    const conn = await mongoose.connect(process.env.MONGO_URI);
-    console.log(`MongoDB Connected: ${conn.connection.host}`);
-  } catch (err) {
-    console.error('Database connection error:', err.message);
-    process.exit(1);
-  }
-};
-
-// Connect to database
-connectDB();
-
-// COMPREHENSIVE REQUEST LOGGING
-app.use((req, res, next) => {
-  console.log('\n=== INCOMING REQUEST ===');
-  console.log(`${req.method} ${req.url}`);
-  console.log('Origin:', req.headers.origin);
-  console.log('User-Agent:', req.headers['user-agent']);
-  console.log('Content-Type:', req.headers['content-type']);
-  console.log('All headers:', JSON.stringify(req.headers, null, 2));
-  console.log('========================\n');
-  next();
-});
-
-// Configure allowed origins
-const allowedOrigins = [
-  'https://course-fronten.netlify.app',
-  'https://course-fronte.netlify.app',
-  'http://localhost:3000',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'http://127.0.0.1:3000',
-  process.env.FRONTEND_URL
-].filter(Boolean);
-
-console.log('🔧 Server starting with allowed origins:', allowedOrigins);
-
-// Enhanced CORS configuration for different endpoints
-const generalCorsOptions = {
-  origin: function (origin, callback) {
-    console.log('\n🔍 GENERAL CORS CHECK:');
-    console.log('Request origin:', origin);
-    console.log('Allowed origins:', allowedOrigins);
+    const videos = await Video.find().sort({ createdAt: -1 });
     
-    // Allow requests with no origin (mobile apps, Postman, etc.)
-    if (!origin) {
-      console.log('✅ No origin - ALLOWED');
-      return callback(null, true);
-    }
+    const videosWithUrls = videos.map(video => ({
+      ...video.toObject(),
+      hlsPlaylist: `/api/videos/stream/${video._id}/master.m3u8`
+    }));
     
-    // Check if origin is in allowed list
-    if (allowedOrigins.includes(origin)) {
-      console.log('✅ Origin ALLOWED:', origin);
-      callback(null, true);
-    } else {
-      console.log('❌ Origin BLOCKED:', origin);
-      console.log('Available origins:', allowedOrigins);
-      callback(new Error(`CORS blocked: ${origin}`));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
-  allowedHeaders: [
-    'Content-Type', 
-    'Authorization', 
-    'X-Requested-With',
-    'Accept',
-    'Accept-Language',
-    'Content-Language',
-    'Cache-Control',
-    'Pragma',
-    'Expires',
-    'If-Modified-Since',
-    'If-None-Match',
-    'If-Range',
-    'Range',
-    'User-Agent',
-    'Origin'
-  ],
-  exposedHeaders: [
-    'Content-Length',
-    'Content-Range',
-    'Accept-Ranges',
-    'Content-Type',
-    'Cache-Control',
-    'Last-Modified',
-    'ETag',
-    'X-Content-Duration'
-  ],
-  optionsSuccessStatus: 200,
-  maxAge: 86400 // 24 hours preflight cache
-};
-
-// Apply general CORS middleware first
-app.use(cors(generalCorsOptions));
-
-// VIDEO-SPECIFIC CORS MIDDLEWARE (for streaming and video endpoints)
-app.use('/api/videos', cors({
-  origin: function (origin, callback) {
-    console.log('\n🎥 VIDEO CORS CHECK:');
-    console.log('Request origin:', origin);
-    console.log('Allowed origins:', allowedOrigins);
-    
-    // Allow requests with no origin (mobile apps, Postman, etc.)
-    if (!origin) {
-      console.log('✅ No origin - ALLOWED');
-      return callback(null, true);
-    }
-    
-    // Check if origin is in allowed list
-    if (allowedOrigins.includes(origin)) {
-      console.log('✅ Origin ALLOWED:', origin);
-      callback(null, true);
-    } else {
-      console.log('❌ Origin BLOCKED:', origin);
-      console.log('Available origins:', allowedOrigins);
-      callback(new Error(`CORS blocked: ${origin}`));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
-  allowedHeaders: [
-    'Content-Type', 
-    'Authorization', 
-    'X-Requested-With',
-    'Accept',
-    'Accept-Language',
-    'Content-Language',
-    'Origin',
-    'Cache-Control', // Added for video streaming
-    'Pragma',        // Added for caching
-    'Expires',       // Added for caching
-    'If-Modified-Since', // Added for conditional requests
-    'If-None-Match',     // Added for conditional requests
-    'If-Range',      // Added for range requests
-    'Range',         // Added for partial content requests (video seeking)
-    'Accept-Ranges', // Added for range requests
-    'Content-Range', // Added for partial content responses
-    'User-Agent'
-  ],
-  exposedHeaders: [
-    'Content-Length', 
-    'Content-Range',
-    'Accept-Ranges',
-    'Cache-Control',
-    'Expires',
-    'Last-Modified',
-    'ETag',
-    'X-Content-Duration'
-  ],
-  optionsSuccessStatus: 200,
-  maxAge: 86400
-}));
-
-// Custom middleware to handle CORS for video streaming endpoints specifically
-app.use('/api/videos/stream', (req, res, next) => {
-  // Set CORS headers explicitly for video streaming
-  const origin = req.headers.origin;
-  
-  if (allowedOrigins.includes(origin) || !origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  }
-  
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', [
-    'Content-Type',
-    'Authorization',
-    'X-Requested-With',
-    'Accept',
-    'Accept-Language',
-    'Content-Language',
-    'Cache-Control',
-    'Pragma',
-    'Expires',
-    'If-Modified-Since',
-    'If-None-Match',
-    'If-Range',
-    'Range',
-    'User-Agent',
-    'Origin'
-  ].join(', '));
-  
-  res.setHeader('Access-Control-Expose-Headers', [
-    'Content-Length',
-    'Content-Range',
-    'Accept-Ranges',
-    'Content-Type',
-    'Cache-Control',
-    'Last-Modified',
-    'ETag',
-    'X-Content-Duration'
-  ].join(', '));
-  
-  res.setHeader('Access-Control-Max-Age', '86400');
-  
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    console.log('🎥 Handling OPTIONS request for video streaming');
-    return res.status(200).end();
-  }
-  
-  next();
-});
-
-// RESPONSE LOGGING
-app.use((req, res, next) => {
-  const originalSend = res.send;
-  res.send = function(data) {
-    console.log('\n=== OUTGOING RESPONSE ===');
-    console.log(`Status: ${res.statusCode}`);
-    console.log('Headers:', JSON.stringify(res.getHeaders(), null, 2));
-    console.log('========================\n');
-    originalSend.call(this, data);
-  };
-  next();
-});
-
-// Body parsing middleware
-app.use(cookieParser());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-// SERVE UPLOADED FILES WITH PROPER HEADERS FOR VIDEO STREAMING
-app.use('/uploads', (req, res, next) => {
-  console.log('📁 Serving file from uploads:', req.path);
-  
-  // Set CORS headers for uploads
-  const origin = req.headers.origin;
-  if (allowedOrigins.includes(origin) || !origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  }
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  
-  // Set appropriate headers for video files
-  if (req.path.endsWith('.mp4') || req.path.endsWith('.m3u8') || req.path.endsWith('.ts')) {
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Type', req.path.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 
-                  req.path.endsWith('.ts') ? 'video/mp2t' : 'video/mp4');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    
-    console.log('🎬 Setting video headers for:', req.path);
-  }
-  
-  next();
-}, express.static(path.join(__dirname, 'uploads')));
-
-// Handle all OPTIONS requests globally
-app.options('*', (req, res) => {
-  console.log('🔧 Handling global OPTIONS request for:', req.path);
-  
-  const origin = req.headers.origin;
-  if (allowedOrigins.includes(origin) || !origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  }
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH');
-  res.setHeader('Access-Control-Allow-Headers', [
-    'Origin',
-    'X-Requested-With',
-    'Content-Type',
-    'Accept',
-    'Authorization',
-    'Cache-Control',
-    'Pragma',
-    'Expires',
-    'If-Modified-Since',
-    'If-None-Match',
-    'If-Range',
-    'Range',
-    'User-Agent'
-  ].join(', '));
-  res.setHeader('Access-Control-Max-Age', '86400');
-  res.status(200).end();
-});
-
-// MANUAL TEST ROUTE TO VERIFY CORS
-app.all('/api/test', (req, res) => {
-  console.log('🧪 Test route hit!');
-  res.json({
-    success: true,
-    message: `${req.method} request successful`,
-    origin: req.headers.origin,
-    timestamp: new Date().toISOString(),
-    cors_headers: {
-      'access-control-allow-origin': res.get('Access-Control-Allow-Origin'),
-      'access-control-allow-credentials': res.get('Access-Control-Allow-Credentials')
-    }
-  });
-});
-
-// SIMPLE AUTH TEST ROUTE (to isolate the issue)
-app.post('/api/auth/test-register', (req, res) => {
-  console.log('🧪 Auth test route hit!');
-  res.json({
-    success: true,
-    message: 'Test register endpoint working',
-    origin: req.headers.origin,
-    body: req.body
-  });
-});
-
-// Routes
-app.use('/api/auth', (req, res, next) => {
-  console.log('🔐 Auth route middleware hit:', req.method, req.url);
-  next();
-}, authRoutes);
-
-app.use('/api/videos', videoRoutes);
-
-// Basic route for testing
-app.get('/', (req, res) => {
-  res.json({
-    success: true,
-    message: 'API is running successfully',
-    cors: 'Enhanced CORS configuration active',
-    uploads: 'Uploads directory available at /uploads'
-  });
-});
-
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Server is healthy',
-    cors: {
-      allowedOrigins: allowedOrigins,
-      yourOrigin: req.headers.origin,
-      isAllowed: allowedOrigins.includes(req.headers.origin)
-    },
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    uploads: {
-      directory: path.join(__dirname, 'uploads'),
-      accessible: true
-    }
-  });
-});
-
-// Catch-all for debugging missing routes
-app.use('/api/*', (req, res) => {
-  console.log('🚫 Unmatched API route:', req.method, req.url);
-  res.status(404).json({
-    success: false,
-    error: `API endpoint not found: ${req.method} ${req.url}`,
-    availableRoutes: [
-      'GET /api/health',
-      'ALL /api/test',
-      'POST /api/auth/test-register',
-      'POST /api/auth/register (from authRoutes)',
-      'GET /uploads/* (static files)'
-    ]
-  });
-});
-
-// Enhanced error handler with CORS support
-app.use((err, req, res, next) => {
-  console.error('\n❌ ERROR HANDLER TRIGGERED:');
-  console.error('Error message:', err.message);
-  console.error('Error stack:', err.stack);
-  console.error('Request URL:', req.url);
-  console.error('Request method:', req.method);
-  console.error('Request origin:', req.headers.origin);
-
-  // Ensure CORS headers are set even for errors
-  const origin = req.headers.origin;
-  if (allowedOrigins.includes(origin) || !origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  }
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-
-  // Mongoose errors
-  if (err.name === 'CastError') {
-    const message = 'Resource not found';
-    err = { message, statusCode: 404 };
-  } else if (err.code === 11000) {
-    const message = 'Duplicate field value entered';
-    err = { message, statusCode: 400 };
-  } else if (err.name === 'ValidationError') {
-    const message = Object.values(err.errors).map(val => val.message);
-    err = { message, statusCode: 400 };
-  }
-  
-  res.status(err.statusCode || 500).json({
-    success: false,
-    error: err.message || 'Internal Server Error',
-    url: req.url,
-    method: req.method
-  });
-});
-
-// Handle unhandled routes
-app.all('*', (req, res) => {
-  console.log(`🔍 404: ${req.method} ${req.url} from ${req.headers.origin}`);
-  
-  // Ensure CORS headers for 404s
-  const origin = req.headers.origin;
-  if (allowedOrigins.includes(origin) || !origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  }
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  
-  res.status(404).json({
-    success: false,
-    error: `Endpoint not found: ${req.method} ${req.url}`
-  });
-});
-
-const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
-  console.log('\n🚀 SERVER STARTED');
-  console.log(`Port: ${PORT}`);
-  console.log('Allowed origins:', allowedOrigins);
-  console.log('Environment:', process.env.NODE_ENV || 'development');
-  console.log('Uploads directory:', path.join(__dirname, 'uploads'));
-  console.log('\n📋 Test these endpoints:');
-  console.log(`- GET  https://course-backends.onrender.com/api/health`);
-  console.log(`- POST https://course-backends.onrender.com/api/test`);
-  console.log(`- POST https://course-backends.onrender.com/api/auth/test-register`);
-  console.log(`- GET  https://course-backends.onrender.com/uploads/[filename]`);
-  console.log('========================\n');
-});
-
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (err, promise) => {
-  console.log(`Error: ${err.message}`);
-  server.close(() => process.exit(1));
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    mongoose.connection.close(false, () => {
-      process.exit(0);
+    res.json({
+      success: true,
+      videos: videosWithUrls
     });
-  });
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
-  server.close(() => {
-    mongoose.connection.close(false, () => {
-      process.exit(0);
+  } catch (error) {
+    console.error('Get videos error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
-  });
-  
+  }
 });
 
-// Export the Express app for deployment platforms
-module.exports = app;
+// Route to get single video - SAME FORMAT AS ORIGINAL
+router.get('/:id', async (req, res) => {
+  try {
+    const video = await Video.findById(req.params.id);
+    
+    if (!video) {
+      return res.status(404).json({
+        success: false,
+        error: 'Video not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      video: {
+        ...video.toObject(),
+        hlsPlaylist: `/api/videos/stream/${video._id}/master.m3u8`
+      }
+    });
+  } catch (error) {
+    console.error('Get single video error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Streaming route - MATCHES YOUR ORIGINAL PATTERN
+router.get('/stream/:id/:file(*)', async (req, res) => {
+  try {
+    const { id, file } = req.params;
+    const filePath = path.join(uploadDir, id, file);
+    
+    console.log('🎬 Streaming request for:', filePath);
+    
+    if (!fs.existsSync(filePath)) {
+      console.error('File not found:', filePath);
+      return res.status(404).json({
+        success: false,
+        error: 'File not found'
+      });
+    }
+    
+    // Set appropriate content type and headers
+    if (file.endsWith('.m3u8')) {
+      res.set('Content-Type', 'application/vnd.apple.mpegurl');
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
+    } else if (file.endsWith('.ts')) {
+      res.set('Content-Type', 'video/mp2t');
+      res.set('Accept-Ranges', 'bytes');
+    }
+    
+    // Send file
+    res.sendFile(filePath, (err) => {
+      if (err) {
+        console.error('Error sending file:', err);
+        if (!res.headersSent) {
+          res.status(500).json({
+            success: false,
+            error: 'Error streaming file'
+          });
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('Streaming error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: 'Streaming error'
+      });
+    }
+  }
+});
+
+module.exports = router;
