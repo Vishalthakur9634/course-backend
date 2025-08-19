@@ -5,149 +5,41 @@ const morgan = require('morgan');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const path = require('path');
-const fs = require('fs');
 
-// Load environment variables first
+// Load environment variables
 dotenv.config({ path: './config/config.env' });
+
+// Import routes
+const authRoutes = require('./routes/auth');
+const videoRoutes = require('./routes/videoRoutes');
 
 const app = express();
 
-// Server state tracking
-let isServerReady = false;
-let isShuttingDown = false;
-
-// Enhanced error handling for uncaught exceptions
-process.on('uncaughtException', (err) => {
-  console.error('💥 UNCAUGHT EXCEPTION! Details:');
-  console.error('Error name:', err.name);
-  console.error('Error message:', err.message);
-  console.error('Stack trace:', err.stack);
-  
-  // Attempt graceful shutdown
-  if (server && !isShuttingDown) {
-    isShuttingDown = true;
-    console.log('🔄 Attempting graceful shutdown...');
-    server.close(() => {
-      process.exit(1);
-    });
-    
-    // Force exit after 5 seconds
-    setTimeout(() => {
-      console.error('⚠️ Force exit after timeout');
-      process.exit(1);
-    }, 5000);
-  } else {
-    process.exit(1);
-  }
-});
-
-// Enhanced error handling for unhandled promise rejections
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 UNHANDLED REJECTION at:', promise, 'reason:', reason);
-  
-  // Don't exit immediately, log and continue
-  if (reason && reason.name === 'MongoNetworkError') {
-    console.log('🔄 MongoDB network error detected, will retry connection...');
-    return;
-  }
-  
-  if (!isShuttingDown) {
-    isShuttingDown = true;
-    console.log('🔄 Attempting graceful shutdown due to unhandled rejection...');
-    
-    if (server) {
-      server.close(() => {
-        process.exit(1);
-      });
-    } else {
-      process.exit(1);
-    }
-  }
-});
-
-// Robust database connection with exponential backoff
-let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 10;
-
+// Database connection
 const connectDB = async () => {
   try {
-    console.log('🔄 Attempting to connect to MongoDB...');
-    
-    if (!process.env.MONGO_URI) {
-      throw new Error('MONGO_URI environment variable is not set');
-    }
-
-    // Compatible connection options
-    const connectionOptions = {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      serverSelectionTimeoutMS: 15000, // 15 seconds
-      socketTimeoutMS: 45000, // 45 seconds
-      connectTimeoutMS: 10000, // 10 seconds
-      maxPoolSize: 10, // Maintain up to 10 socket connections
-      retryWrites: true,
-      retryReads: true,
-      bufferCommands: false, // Disable mongoose buffering
-      bufferMaxEntries: 0 // Disable mongoose buffering
-    };
-    
-    const conn = await mongoose.connect(process.env.MONGO_URI, connectionOptions);
-    
-    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
-    console.log(`📊 Database Name: ${conn.connection.name}`);
-    
-    // Reset reconnect attempts on successful connection
-    reconnectAttempts = 0;
-    
-    // Set up connection event listeners
-    mongoose.connection.on('error', (err) => {
-      console.error('❌ MongoDB connection error:', err);
-    });
-    
-    mongoose.connection.on('disconnected', () => {
-      console.log('⚠️ MongoDB disconnected');
-      if (!isShuttingDown) {
-        setTimeout(connectDB, 5000);
-      }
-    });
-    
-    mongoose.connection.on('reconnected', () => {
-      console.log('✅ MongoDB reconnected');
-    });
-    
-    return conn;
-    
+    const conn = await mongoose.connect(process.env.MONGO_URI);
+    console.log(`MongoDB Connected: ${conn.connection.host}`);
   } catch (err) {
-    console.error('❌ Database connection error:', err.message);
-    
-    reconnectAttempts++;
-    
-    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      console.error('💥 Max reconnection attempts reached. Exiting...');
-      process.exit(1);
-    }
-    
-    // Exponential backoff: 2^attempt * 1000ms, max 30 seconds
-    const delay = Math.min(Math.pow(2, reconnectAttempts) * 1000, 30000);
-    console.log(`🔄 Retrying database connection in ${delay/1000} seconds... (Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
-    
-    setTimeout(connectDB, delay);
+    console.error('Database connection error:', err.message);
+    process.exit(1);
   }
 };
 
-// Initialize database connection
+// Connect to database
 connectDB();
 
-// Ensure uploads directory exists
-const uploadDir = path.join(__dirname, 'uploads');
-try {
-  if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
-    console.log('📁 Created uploads directory:', uploadDir);
-  }
-} catch (error) {
-  console.error('❌ Error creating uploads directory:', error);
-}
+// COMPREHENSIVE REQUEST LOGGING
+app.use((req, res, next) => {
+  console.log('\n=== INCOMING REQUEST ===');
+  console.log(`${req.method} ${req.url}`);
+  console.log('Origin:', req.headers.origin);
+  console.log('User-Agent:', req.headers['user-agent']);
+  console.log('Content-Type:', req.headers['content-type']);
+  console.log('All headers:', JSON.stringify(req.headers, null, 2));
+  console.log('========================\n');
+  next();
+});
 
 // Configure allowed origins
 const allowedOrigins = [
@@ -162,25 +54,86 @@ const allowedOrigins = [
 
 console.log('🔧 Server starting with allowed origins:', allowedOrigins);
 
-// Enhanced CORS configuration
-const corsOptions = {
+// Enhanced CORS configuration for different endpoints
+const generalCorsOptions = {
   origin: function (origin, callback) {
+    console.log('\n🔍 GENERAL CORS CHECK:');
+    console.log('Request origin:', origin);
+    console.log('Allowed origins:', allowedOrigins);
+    
     // Allow requests with no origin (mobile apps, Postman, etc.)
     if (!origin) {
+      console.log('✅ No origin - ALLOWED');
       return callback(null, true);
     }
     
+    // Check if origin is in allowed list
     if (allowedOrigins.includes(origin)) {
+      console.log('✅ Origin ALLOWED:', origin);
       callback(null, true);
     } else {
-      console.log('❌ CORS blocked origin:', origin);
-      // Don't block in development, just warn
-      if (process.env.NODE_ENV === 'development') {
-        console.log('⚠️ Development mode: allowing blocked origin');
-        callback(null, true);
-      } else {
-        callback(new Error(`CORS blocked: ${origin}`));
-      }
+      console.log('❌ Origin BLOCKED:', origin);
+      console.log('Available origins:', allowedOrigins);
+      callback(new Error(`CORS blocked: ${origin}`));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With',
+    'Accept',
+    'Accept-Language',
+    'Content-Language',
+    'Cache-Control',
+    'Pragma',
+    'Expires',
+    'If-Modified-Since',
+    'If-None-Match',
+    'If-Range',
+    'Range',
+    'User-Agent',
+    'Origin'
+  ],
+  exposedHeaders: [
+    'Content-Length',
+    'Content-Range',
+    'Accept-Ranges',
+    'Content-Type',
+    'Cache-Control',
+    'Last-Modified',
+    'ETag',
+    'X-Content-Duration'
+  ],
+  optionsSuccessStatus: 200,
+  maxAge: 86400 // 24 hours preflight cache
+};
+
+// Apply general CORS middleware first
+app.use(cors(generalCorsOptions));
+
+// VIDEO-SPECIFIC CORS MIDDLEWARE (for streaming and video endpoints)
+app.use('/api/videos', cors({
+  origin: function (origin, callback) {
+    console.log('\n🎥 VIDEO CORS CHECK:');
+    console.log('Request origin:', origin);
+    console.log('Allowed origins:', allowedOrigins);
+    
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) {
+      console.log('✅ No origin - ALLOWED');
+      return callback(null, true);
+    }
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.includes(origin)) {
+      console.log('✅ Origin ALLOWED:', origin);
+      callback(null, true);
+    } else {
+      console.log('❌ Origin BLOCKED:', origin);
+      console.log('Available origins:', allowedOrigins);
+      callback(new Error(`CORS blocked: ${origin}`));
     }
   },
   credentials: true,
@@ -193,19 +146,19 @@ const corsOptions = {
     'Accept-Language',
     'Content-Language',
     'Origin',
-    'Cache-Control',
-    'Pragma',
-    'Expires',
-    'If-Modified-Since',
-    'If-None-Match',
-    'If-Range',
-    'Range',
-    'Accept-Ranges',
-    'Content-Range',
+    'Cache-Control', // Added for video streaming
+    'Pragma',        // Added for caching
+    'Expires',       // Added for caching
+    'If-Modified-Since', // Added for conditional requests
+    'If-None-Match',     // Added for conditional requests
+    'If-Range',      // Added for range requests
+    'Range',         // Added for partial content requests (video seeking)
+    'Accept-Ranges', // Added for range requests
+    'Content-Range', // Added for partial content responses
     'User-Agent'
   ],
   exposedHeaders: [
-    'Content-Length',
+    'Content-Length', 
     'Content-Range',
     'Accept-Ranges',
     'Cache-Control',
@@ -216,454 +169,304 @@ const corsOptions = {
   ],
   optionsSuccessStatus: 200,
   maxAge: 86400
-};
-
-// Apply CORS middleware with error handling
-app.use((req, res, next) => {
-  cors(corsOptions)(req, res, (err) => {
-    if (err) {
-      console.error('CORS Error:', err.message);
-      return res.status(403).json({
-        success: false,
-        error: 'CORS policy violation',
-        origin: req.headers.origin
-      });
-    }
-    next();
-  });
-});
-
-// Server readiness check middleware
-app.use((req, res, next) => {
-  if (isShuttingDown) {
-    return res.status(503).json({
-      success: false,
-      error: 'Server is shutting down',
-      message: 'Please try again in a moment'
-    });
-  }
-  next();
-});
-
-// Request timeout middleware
-app.use((req, res, next) => {
-  req.setTimeout(30000, () => {
-    console.log('⏰ Request timeout:', req.url);
-    if (!res.headersSent) {
-      res.status(408).json({
-        success: false,
-        error: 'Request timeout'
-      });
-    }
-  });
-  next();
-});
-
-// Logging middleware
-if (process.env.NODE_ENV === 'development') {
-  app.use(morgan('dev'));
-} else {
-  app.use(morgan('combined'));
-}
-
-// Request logging middleware with error handling
-app.use((req, res, next) => {
-  try {
-    console.log(`📥 ${new Date().toISOString()} - ${req.method} ${req.url}`);
-  } catch (error) {
-    console.error('Logging error:', error);
-  }
-  next();
-});
-
-// Body parsing middleware with error handling
-app.use(express.json({ 
-  limit: '10mb',
-  verify: (req, res, buf, encoding) => {
-    try {
-      JSON.parse(buf);
-    } catch (e) {
-      console.error('JSON Parse Error:', e.message);
-      throw new Error('Invalid JSON');
-    }
-  }
 }));
 
-app.use(express.urlencoded({ 
-  extended: true, 
-  limit: '10mb' 
-}));
+// Custom middleware to handle CORS for video streaming endpoints specifically
+app.use('/api/videos/stream', (req, res, next) => {
+  // Set CORS headers explicitly for video streaming
+  const origin = req.headers.origin;
+  
+  if (allowedOrigins.includes(origin) || !origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  }
+  
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Accept-Language',
+    'Content-Language',
+    'Cache-Control',
+    'Pragma',
+    'Expires',
+    'If-Modified-Since',
+    'If-None-Match',
+    'If-Range',
+    'Range',
+    'User-Agent',
+    'Origin'
+  ].join(', '));
+  
+  res.setHeader('Access-Control-Expose-Headers', [
+    'Content-Length',
+    'Content-Range',
+    'Accept-Ranges',
+    'Content-Type',
+    'Cache-Control',
+    'Last-Modified',
+    'ETag',
+    'X-Content-Duration'
+  ].join(', '));
+  
+  res.setHeader('Access-Control-Max-Age', '86400');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    console.log('🎥 Handling OPTIONS request for video streaming');
+    return res.status(200).end();
+  }
+  
+  next();
+});
 
+// RESPONSE LOGGING
+app.use((req, res, next) => {
+  const originalSend = res.send;
+  res.send = function(data) {
+    console.log('\n=== OUTGOING RESPONSE ===');
+    console.log(`Status: ${res.statusCode}`);
+    console.log('Headers:', JSON.stringify(res.getHeaders(), null, 2));
+    console.log('========================\n');
+    originalSend.call(this, data);
+  };
+  next();
+});
+
+// Body parsing middleware
 app.use(cookieParser());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
 
-// Serve uploaded files with proper error handling
+// SERVE UPLOADED FILES WITH PROPER HEADERS FOR VIDEO STREAMING
 app.use('/uploads', (req, res, next) => {
-  express.static(path.join(__dirname, 'uploads'), {
-    setHeaders: (res, filePath) => {
-      try {
-        if (filePath.endsWith('.m3u8')) {
-          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-          res.setHeader('Cache-Control', 'no-cache');
-        } else if (filePath.endsWith('.ts')) {
-          res.setHeader('Content-Type', 'video/mp2t');
-          res.setHeader('Accept-Ranges', 'bytes');
-        }
-      } catch (error) {
-        console.error('Error setting headers:', error);
-      }
-    },
-    fallthrough: false // Don't fall through to next middleware on file not found
-  })(req, res, (err) => {
-    if (err) {
-      console.error('Static file serving error:', err);
-      res.status(404).json({
-        success: false,
-        error: 'File not found'
-      });
-    } else {
-      next();
+  console.log('📁 Serving file from uploads:', req.path);
+  
+  // Set CORS headers for uploads
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin) || !origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  
+  // Set appropriate headers for video files
+  if (req.path.endsWith('.mp4') || req.path.endsWith('.m3u8') || req.path.endsWith('.ts')) {
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Type', req.path.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 
+                  req.path.endsWith('.ts') ? 'video/mp2t' : 'video/mp4');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
+    console.log('🎬 Setting video headers for:', req.path);
+  }
+  
+  next();
+}, express.static(path.join(__dirname, 'uploads')));
+
+// Handle all OPTIONS requests globally
+app.options('*', (req, res) => {
+  console.log('🔧 Handling global OPTIONS request for:', req.path);
+  
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin) || !origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH');
+  res.setHeader('Access-Control-Allow-Headers', [
+    'Origin',
+    'X-Requested-With',
+    'Content-Type',
+    'Accept',
+    'Authorization',
+    'Cache-Control',
+    'Pragma',
+    'Expires',
+    'If-Modified-Since',
+    'If-None-Match',
+    'If-Range',
+    'Range',
+    'User-Agent'
+  ].join(', '));
+  res.setHeader('Access-Control-Max-Age', '86400');
+  res.status(200).end();
+});
+
+// MANUAL TEST ROUTE TO VERIFY CORS
+app.all('/api/test', (req, res) => {
+  console.log('🧪 Test route hit!');
+  res.json({
+    success: true,
+    message: `${req.method} request successful`,
+    origin: req.headers.origin,
+    timestamp: new Date().toISOString(),
+    cors_headers: {
+      'access-control-allow-origin': res.get('Access-Control-Allow-Origin'),
+      'access-control-allow-credentials': res.get('Access-Control-Allow-Credentials')
     }
   });
 });
 
-// Health check endpoints with comprehensive status
+// SIMPLE AUTH TEST ROUTE (to isolate the issue)
+app.post('/api/auth/test-register', (req, res) => {
+  console.log('🧪 Auth test route hit!');
+  res.json({
+    success: true,
+    message: 'Test register endpoint working',
+    origin: req.headers.origin,
+    body: req.body
+  });
+});
+
+// Routes
+app.use('/api/auth', (req, res, next) => {
+  console.log('🔐 Auth route middleware hit:', req.method, req.url);
+  next();
+}, authRoutes);
+
+app.use('/api/videos', videoRoutes);
+
+// Basic route for testing
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'Course Backend API is running',
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    nodeVersion: process.version,
-    serverReady: isServerReady,
-    database: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
+    message: 'API is running successfully',
+    cors: 'Enhanced CORS configuration active',
+    uploads: 'Uploads directory available at /uploads'
   });
 });
 
-app.get('/health', (req, res) => {
-  const dbStatus = mongoose.connection.readyState;
-  const isHealthy = dbStatus === 1 && !isShuttingDown;
-  
-  res.status(isHealthy ? 200 : 503).json({
-    success: isHealthy,
-    message: isHealthy ? 'Server is healthy' : 'Server is not ready',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    database: {
-      status: dbStatus === 1 ? 'Connected' : 'Disconnected',
-      readyState: dbStatus
-    },
-    server: {
-      ready: isServerReady,
-      shuttingDown: isShuttingDown
-    }
-  });
-});
-
-// API health check with CORS information
+// Health check endpoint
 app.get('/api/health', (req, res) => {
-  const dbStatus = mongoose.connection.readyState;
-  const isHealthy = dbStatus === 1 && !isShuttingDown;
-  
-  res.status(isHealthy ? 200 : 503).json({
-    success: isHealthy,
-    message: isHealthy ? 'API is healthy' : 'API is not ready',
-    cors: {
-      allowedOrigins: allowedOrigins,
-      yourOrigin: req.headers.origin || 'none',
-      isAllowed: !req.headers.origin || allowedOrigins.includes(req.headers.origin)
-    },
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
-  });
-});
-
-// Readiness probe (for load balancers)
-app.get('/ready', (req, res) => {
-  if (mongoose.connection.readyState === 1 && isServerReady && !isShuttingDown) {
-    res.status(200).json({ ready: true });
-  } else {
-    res.status(503).json({ ready: false });
-  }
-});
-
-// Liveness probe (for load balancers)
-app.get('/alive', (req, res) => {
-  if (!isShuttingDown) {
-    res.status(200).json({ alive: true });
-  } else {
-    res.status(503).json({ alive: false });
-  }
-});
-
-// Import routes with enhanced error handling
-let authRoutes, videoRoutes;
-
-const createFallbackRouter = (routeName) => {
-  const router = express.Router();
-  router.all('*', (req, res) => {
-    res.status(503).json({
-      success: false,
-      error: `${routeName} routes not available`,
-      message: 'Service temporarily unavailable'
-    });
-  });
-  return router;
-};
-
-try {
-  authRoutes = require('./routes/auth');
-  console.log('✅ Auth routes loaded successfully');
-} catch (error) {
-  console.error('❌ Error loading auth routes:', error.message);
-  authRoutes = createFallbackRouter('Auth');
-}
-
-try {
-  videoRoutes = require('./routes/videoRoutes');
-  console.log('✅ Video routes loaded successfully');
-} catch (error) {
-  console.error('❌ Error loading video routes:', error.message);
-  videoRoutes = createFallbackRouter('Video');
-}
-
-// Apply routes with error handling
-app.use('/api/auth', (req, res, next) => {
-  try {
-    authRoutes(req, res, next);
-  } catch (error) {
-    console.error('Auth route error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Auth service error'
-    });
-  }
-});
-
-app.use('/api/videos', (req, res, next) => {
-  try {
-    videoRoutes(req, res, next);
-  } catch (error) {
-    console.error('Video route error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Video service error'
-    });
-  }
-});
-
-// Test route with comprehensive information
-app.get('/api/test', (req, res) => {
   res.json({
     success: true,
-    message: 'API test endpoint working',
+    message: 'Server is healthy',
+    cors: {
+      allowedOrigins: allowedOrigins,
+      yourOrigin: req.headers.origin,
+      isAllowed: allowedOrigins.includes(req.headers.origin)
+    },
     timestamp: new Date().toISOString(),
-    server: {
-      ready: isServerReady,
-      uptime: process.uptime(),
-      memory: process.memoryUsage(),
-      nodeVersion: process.version
-    },
-    database: {
-      status: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected',
-      readyState: mongoose.connection.readyState
-    },
-    request: {
-      method: req.method,
-      url: req.url,
-      headers: req.headers,
-      ip: req.ip
+    environment: process.env.NODE_ENV || 'development',
+    uploads: {
+      directory: path.join(__dirname, 'uploads'),
+      accessible: true
     }
   });
 });
 
-// Handle 404 for API routes
+// Catch-all for debugging missing routes
 app.use('/api/*', (req, res) => {
-  console.log(`🚫 API route not found: ${req.method} ${req.originalUrl}`);
+  console.log('🚫 Unmatched API route:', req.method, req.url);
   res.status(404).json({
     success: false,
-    error: `API endpoint not found: ${req.method} ${req.originalUrl}`,
-    availableEndpoints: [
-      'GET /',
-      'GET /health',
-      'GET /ready',
-      'GET /alive',
+    error: `API endpoint not found: ${req.method} ${req.url}`,
+    availableRoutes: [
       'GET /api/health',
-      'GET /api/test',
-      'ALL /api/auth/*',
-      'ALL /api/videos/*'
+      'ALL /api/test',
+      'POST /api/auth/test-register',
+      'POST /api/auth/register (from authRoutes)',
+      'GET /uploads/* (static files)'
     ]
   });
 });
 
-// Global error handler with enhanced logging
+// Enhanced error handler with CORS support
 app.use((err, req, res, next) => {
-  console.error('🔥 Global error handler triggered:');
-  console.error('Error name:', err.name);
+  console.error('\n❌ ERROR HANDLER TRIGGERED:');
   console.error('Error message:', err.message);
+  console.error('Error stack:', err.stack);
   console.error('Request URL:', req.url);
   console.error('Request method:', req.method);
-  console.error('Request headers:', req.headers);
-  console.error('Stack trace:', err.stack);
-  
-  // Handle specific error types
-  let statusCode = err.statusCode || 500;
-  let errorMessage = err.message || 'Internal Server Error';
-  
-  if (err.name === 'ValidationError') {
-    statusCode = 400;
-    errorMessage = 'Validation Error';
-  } else if (err.name === 'CastError') {
-    statusCode = 400;
-    errorMessage = 'Invalid ID format';
+  console.error('Request origin:', req.headers.origin);
+
+  // Ensure CORS headers are set even for errors
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin) || !origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+  // Mongoose errors
+  if (err.name === 'CastError') {
+    const message = 'Resource not found';
+    err = { message, statusCode: 404 };
   } else if (err.code === 11000) {
-    statusCode = 400;
-    errorMessage = 'Duplicate field value';
-  } else if (err.name === 'JsonWebTokenError') {
-    statusCode = 401;
-    errorMessage = 'Invalid token';
-  } else if (err.name === 'TokenExpiredError') {
-    statusCode = 401;
-    errorMessage = 'Token expired';
+    const message = 'Duplicate field value entered';
+    err = { message, statusCode: 400 };
+  } else if (err.name === 'ValidationError') {
+    const message = Object.values(err.errors).map(val => val.message);
+    err = { message, statusCode: 400 };
   }
   
-  const errorResponse = {
+  res.status(err.statusCode || 500).json({
     success: false,
-    error: errorMessage,
-    timestamp: new Date().toISOString()
-  };
-
-  if (process.env.NODE_ENV === 'development') {
-    errorResponse.stack = err.stack;
-    errorResponse.details = {
-      name: err.name,
-      code: err.code
-    };
-  }
-
-  // Don't send response if headers already sent
-  if (!res.headersSent) {
-    res.status(statusCode).json(errorResponse);
-  }
-});
-
-// Handle all other routes
-app.use('*', (req, res) => {
-  res.status(404).json({
-    success: false,
-    error: `Route ${req.originalUrl} not found`,
-    message: 'This endpoint does not exist'
+    error: err.message || 'Internal Server Error',
+    url: req.url,
+    method: req.method
   });
 });
 
-// Port configuration
-const PORT = process.env.PORT || 3000;
-
-// Start server with enhanced error handling and health checks
-let server;
-
-const startServer = () => {
-  try {
-    server = app.listen(PORT, '0.0.0.0', () => {
-      isServerReady = true;
-      console.log('\n🚀 ================================');
-      console.log('🚀 SERVER STARTED SUCCESSFULLY');
-      console.log('🚀 ================================');
-      console.log(`📍 Port: ${PORT}`);
-      console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🕐 Started at: ${new Date().toISOString()}`);
-      console.log(`📁 Uploads directory: ${uploadDir}`);
-      console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-      console.log(`🔗 Ready check: http://localhost:${PORT}/ready`);
-      console.log(`🔗 API test: http://localhost:${PORT}/api/test`);
-      console.log('🚀 ================================\n');
-    });
-
-    // Configure server timeouts
-    server.timeout = 30000; // 30 seconds
-    server.keepAliveTimeout = 65000; // 65 seconds
-    server.headersTimeout = 66000; // 66 seconds
-
-    server.on('error', (err) => {
-      console.error('❌ Server error:', err);
-      
-      if (err.code === 'EADDRINUSE') {
-        console.error(`❌ Port ${PORT} is already in use`);
-        console.log('🔄 Trying to start on next available port...');
-        
-        // Try next port
-        const newPort = parseInt(PORT) + 1;
-        process.env.PORT = newPort.toString();
-        setTimeout(startServer, 1000);
-      } else {
-        console.error('❌ Server startup failed:', err);
-        process.exit(1);
-      }
-    });
-
-    server.on('clientError', (err, socket) => {
-      console.error('Client error:', err);
-      if (!socket.destroyed) {
-        socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
-      }
-    });
-
-    server.on('connection', (socket) => {
-      socket.on('error', (err) => {
-        console.error('Socket error:', err);
-      });
-    });
-
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    setTimeout(startServer, 2000); // Retry after 2 seconds
-  }
-};
-
-// Graceful shutdown handling
-const gracefulShutdown = (signal) => {
-  console.log(`\n📴 Received ${signal}. Graceful shutdown initiated...`);
-  isShuttingDown = true;
+// Handle unhandled routes
+app.all('*', (req, res) => {
+  console.log(`🔍 404: ${req.method} ${req.url} from ${req.headers.origin}`);
   
-  if (server) {
-    // Stop accepting new requests
-    server.close((err) => {
-      if (err) {
-        console.error('Error closing server:', err);
-      } else {
-        console.log('📴 HTTP server closed');
-      }
-      
-      // Close database connection
-      mongoose.connection.close(false, (err) => {
-        if (err) {
-          console.error('Error closing database:', err);
-        } else {
-          console.log('📴 MongoDB connection closed');
-        }
-        
-        console.log('📴 Graceful shutdown completed');
-        process.exit(0);
-      });
-    });
-
-    // Force close server after 10 seconds
-    setTimeout(() => {
-      console.error('📴 Could not close connections in time, forcefully shutting down');
-      process.exit(1);
-    }, 10000);
-  } else {
-    process.exit(0);
+  // Ensure CORS headers for 404s
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin) || !origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
   }
-};
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  
+  res.status(404).json({
+    success: false,
+    error: `Endpoint not found: ${req.method} ${req.url}`
+  });
+});
 
-// Register shutdown handlers
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+const PORT = process.env.PORT || 3000;
+const server = app.listen(PORT, () => {
+  console.log('\n🚀 SERVER STARTED');
+  console.log(`Port: ${PORT}`);
+  console.log('Allowed origins:', allowedOrigins);
+  console.log('Environment:', process.env.NODE_ENV || 'development');
+  console.log('Uploads directory:', path.join(__dirname, 'uploads'));
+  console.log('\n📋 Test these endpoints:');
+  console.log(`- GET  https://course-backends.onrender.com/api/health`);
+  console.log(`- POST https://course-backends.onrender.com/api/test`);
+  console.log(`- POST https://course-backends.onrender.com/api/auth/test-register`);
+  console.log(`- GET  https://course-backends.onrender.com/uploads/[filename]`);
+  console.log('========================\n');
+});
 
-// Start the server
-startServer();
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (err, promise) => {
+  console.log(`Error: ${err.message}`);
+  server.close(() => process.exit(1));
+});
 
-// Export app for testing
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  server.close(() => {
+    mongoose.connection.close(false, () => {
+      process.exit(0);
+    });
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, shutting down gracefully');
+  server.close(() => {
+    mongoose.connection.close(false, () => {
+      process.exit(0);
+    });
+  });
+  
+});
+
+// Export the Express app for deployment platforms
 module.exports = app;
